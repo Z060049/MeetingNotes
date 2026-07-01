@@ -270,6 +270,7 @@ Phase 3:
 - The current `.app` bundle is a development wrapper, not a signed/notarized production app.
 - System-audio silence detection is currently based on file size; it should be upgraded to real audio-level/silence analysis.
 - System audio capture needs broader manual testing across Zoom, Google Meet, Teams, browser playback, speakers, wired headphones, AirPods/Bluetooth routes, and phone-call routing.
+- Multilingual support (e.g. Mandarin) is only partial: Whisper transcription auto-detects and works, but (a) the summary language is not pinned to the transcript's language, (b) the transcript de-duplication sentence splitter only handles ASCII `.!?` and misses full-width CJK punctuation (`。！？`), and (c) the Whisper request sends an English hint prompt. Action item: pin summary language to the transcript, add CJK punctuation to the de-dup splitter, and drop/localize the Whisper hint prompt.
 - Keychain prompts are visible in the development build and may need a clearer production signing/access-group setup.
 - Local processing mode is not implemented.
 - Auto-start at login is not implemented.
@@ -400,3 +401,56 @@ AutoScribe MVP is ready when:
 - Transcript + summary Markdown file is generated and saved successfully
 - User can choose API mode and complete processing end-to-end
 - Basic compliance warning and recording-state visibility are in place
+
+## 15) Distribution and go-to-market recommendation
+
+This section captures the recommended path for distributing and marketing AutoScribe. It supersedes the informal "open source vs. share privately" framing.
+
+### 15.1 Key constraint
+
+The processing pipeline splits into two very different steps, and they should not be treated the same way:
+
+- Transcription (audio to text) is the expensive, high-volume step and requires a speech model (OpenAI Whisper today). Anthropic/Claude has no speech-to-text API, and "Codex" is a coding agent, not a transcription service.
+- Summarization (text to notes) is cheap and provider-agnostic; OpenAI, Claude, Gemini, or a local model can all do it.
+
+Implication: "let users log in with Claude/Codex" does not map onto what the app does. There is also no consumer OAuth that lets a third-party app bill transcription against someone's ChatGPT or Claude subscription. The only realistic bring-your-own-key (BYOK) flow is pasting an API key, which the app already supports for OpenAI.
+
+Therefore the prior decision before any distribution model is: where does transcription run?
+
+- Keep it on OpenAI Whisper (per-minute cost, mandatory key), or
+- Move it on-device (whisper.cpp, or Apple `SpeechTranscriber`/`SpeechAnalyzer` on macOS 26). On-device transcription is free, private, needs no key, and removes the biggest cost and liability driver. BYOK then only matters for the cheap summary step.
+
+### 15.2 Evaluation of the two distribution options
+
+Option B — own API key, shared privately with friends:
+- Good only for fast validation; zero friction for testers, quick feedback.
+- Do not bake the API key into a distributed `.app` bundle; it is trivially extractable and the account can be drained. If used, keep the key behind a small rate-limited proxy or hand-install on each machine and accept paying their usage.
+- Does not scale and has no revenue path. This is a testing phase, not a strategy.
+
+Option A — open source on GitHub, BYOK:
+- Best long-term: zero cost to maintainer, no liability for user API spend, infinite scale, developer credibility, and a natural privacy story.
+- Frictions to plan for:
+  - Audience filter: "get an OpenAI API key" excludes non-technical users; on-device transcription softens this a lot.
+  - Distribution: unsigned Mac apps hit Gatekeeper; signing/notarization (Track 4) is not done.
+  - Legal/consent: BYOK and/or on-device means the maintainer never touches user audio, which is a selling point, not just a cost saver.
+
+### 15.3 Recommended sequence
+
+1. Now: use Option B privately with a few friends to validate note quality and capture reliability across Zoom/Meet/Teams. Own key, hand-installed, no public binary.
+2. Before any public launch: move transcription on-device (Apple `SpeechAnalyzer` or `whisper.cpp`). Highest-leverage change: removes cost, removes the mandatory key, and creates the privacy differentiator versus Otter/Fireflies/Granola.
+3. Then open source (Option A) with on-device transcription by default, optional BYOK for a cloud summary (OpenAI or Claude, swappable), and a signed/notarized release so non-developers can run it.
+
+### 15.4 Positioning
+
+Target hook once transcription is on-device: "On-device meeting notes for any Mac call — works on Zoom, Meet, Teams, or a phone call, and your audio never leaves your machine." This is sharper than "another transcriber where you bring an OpenAI key."
+
+### 15.5 Engineering prerequisites (shared by both paths)
+
+- Abstract the summarization provider so OpenAI and Claude are swappable behind `ProcessingProvider`.
+- Add an on-device transcription path alongside the existing OpenAI provider.
+- Complete production packaging (signing/notarization) from Track 4 before public distribution.
+
+### 15.6 Open go-to-market questions
+
+- Target user: privacy-conscious individuals vs. a broad prosumer crowd (decides how hard the on-device + open-source bet is worth making).
+- End state: revenue product vs. portfolio/reputation project (decides whether open-source BYOK is the destination or just a beachhead).
