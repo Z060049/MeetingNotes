@@ -4,6 +4,7 @@ import SwiftUI
 
 struct DiagnosticsView: View {
     @ObservedObject var controller: AutoScribeController
+    @StateObject private var resourceMonitor = ResourceMonitor()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -21,6 +22,8 @@ struct DiagnosticsView: View {
                     controller.clearDiagnostics()
                 }
             }
+
+            resourceMonitorSection
 
             if controller.diagnostics.isEmpty {
                 Text("No diagnostic events yet.")
@@ -44,6 +47,47 @@ struct DiagnosticsView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 8))
             }
         }
+    }
+
+    private var resourceMonitorSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Toggle("CPU / Memory testing", isOn: Binding(
+                    get: { resourceMonitor.isRunning },
+                    set: { isOn in isOn ? resourceMonitor.start() : resourceMonitor.stop() }
+                ))
+                .font(.caption)
+                .toggleStyle(.switch)
+
+                Spacer()
+
+                if resourceMonitor.isRunning {
+                    Button("Reset") {
+                        resourceMonitor.resetStats()
+                    }
+                    .font(.caption)
+                }
+            }
+
+            if resourceMonitor.isRunning {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("CPU   cur \(resourceMonitor.cpuText)   avg \(resourceMonitor.averageCPUText)   max \(resourceMonitor.peakCPUText)")
+                    Text("Mem   cur \(resourceMonitor.memoryText)   peak \(resourceMonitor.peakMemoryText)")
+                }
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+
+                Text("Tip: to capture recording usage, turn this on, close this window, record/speak, then reopen to read avg/max (keeping the window open adds CPU).")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
     private func copyDiagnostics() {

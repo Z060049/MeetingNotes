@@ -1,3 +1,4 @@
+import AppKit
 import AutoScribeCore
 import SwiftUI
 
@@ -72,6 +73,10 @@ struct MenuBarRootView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
+
+                Button("Open Folder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                }
             }
         }
     }
