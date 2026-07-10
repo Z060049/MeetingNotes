@@ -504,3 +504,79 @@ AutoScribe.dmg
 3. Write release build script that copies models into the app bundle
 4. Notarize and create DMG
 5. Add "Update model" UI to Settings
+
+---
+
+## 17. Resource Usage Monitoring
+
+### 17.1 Goal
+
+Show the user real-time memory and CPU usage while the app is recording or processing, so they can see the cost of on-device AI and catch runaway resource usage early.
+
+### 17.2 What to monitor
+
+| Metric | When | Why |
+|---|---|---|
+| RAM (RSS) | During recording and processing | On-device models use 300–800 MB; warn if system is low |
+| CPU % | During transcription and summarization | CPU-only Whisper inference can pin a core for 5–30s |
+| Processing time | After each recording | Helps user decide if they need a smaller/larger model |
+| Peak memory | After processing completes | Shown in the session summary |
+
+### 17.3 UX
+
+- Small live indicator in the popover (e.g. "RAM: 340 MB | CPU: 42%") visible during Processing state
+- After processing completes, show a one-line summary: "Transcribed in 8s · Summarized in 12s · Peak RAM 410 MB"
+- Warn (non-blocking toast) if system free RAM drops below 1 GB during processing
+
+### 17.4 Implementation notes
+
+- Use `task_info()` (mach) or `ProcessInfo` for CPU and RSS
+- Already have a `ResourceMonitor.swift` stub in the codebase — extend it
+- Log metrics to the existing diagnostics panel for debugging
+
+---
+
+## 18. Platform Support
+
+### 18.1 Current: macOS only
+
+AutoScribe is macOS-exclusive. Every layer of the stack depends on Apple-only frameworks:
+
+| Component | Framework | Apple-only? |
+|---|---|---|
+| System audio capture | `ScreenCaptureKit` | Yes — macOS 12.3+ |
+| Microphone recording | `AVFoundation` | Yes |
+| Whisper transcription | `WhisperKit` + `CoreML` | Yes — Apple Silicon |
+| LLM summarization | `MLX` + Metal shaders | Yes — Apple Silicon |
+| Menu bar UI | `AppKit` + `NSStatusItem` | Yes — macOS |
+| Apple Intelligence | `FoundationModels` | Yes — macOS 26+ |
+
+### 18.2 Windows — not feasible as a port
+
+A Windows version would be a complete rewrite, not a port. Equivalent Windows stack:
+
+| Component | Windows equivalent |
+|---|---|
+| System audio | WASAPI loopback capture |
+| Transcription | whisper.cpp + DirectML or ONNX Runtime |
+| LLM inference | llama.cpp or ONNX Runtime |
+| UI | WinUI 3, Electron, or Tauri |
+
+This is a separate product with a separate codebase. Swift code cannot be reused. Not in scope.
+
+### 18.3 iOS / iPadOS — possible but limited
+
+- `AVFoundation` and `CoreML` are available
+- `ScreenCaptureKit` is iOS 17+ but system audio capture from other apps is heavily restricted
+- No menu bar — would need a different UX (e.g. a floating button or Lock Screen widget)
+- MLX works on iPhone 15 Pro+ (A17 Pro) and all M-chip iPads
+- Feasible as a future companion app, not a port
+
+### 18.4 Minimum Mac requirements
+
+| Requirement | Minimum | Recommended |
+|---|---|---|
+| macOS | 14.0 (Sonoma) | 26.0 (for Apple Intelligence) |
+| Chip | Apple Silicon (M1+) | M2+ for faster MLX inference |
+| RAM | 8 GB | 16 GB (headroom for large models) |
+| Storage | 1 GB free | 2 GB (room for model upgrades) |
