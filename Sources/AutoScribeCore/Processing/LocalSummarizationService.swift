@@ -10,6 +10,7 @@ import MLXLMCommon
 import MLXHuggingFace
 import HuggingFace
 import Tokenizers
+import Hub
 #endif
 
 // MARK: - Tier
@@ -37,7 +38,11 @@ public final class LocalSummarizationService: ObservableObject, @unchecked Senda
 
     @Published public private(set) var mlxDownloadState: ModelDownloadState = .notDownloaded
 
-    public let tier: SummarizationTier
+    /// Starts as `.mlx` (or `.unavailable` on Intel) and may upgrade to
+    /// `.appleIntelligence` asynchronously after the FoundationModels service
+    /// responds. Kept off the main thread to avoid startup hangs when the
+    /// entitlement or service is unavailable.
+    @Published public private(set) var tier: SummarizationTier
 
     #if arch(arm64)
     private var mlxContainer: ModelContainer?
@@ -45,16 +50,27 @@ public final class LocalSummarizationService: ObservableObject, @unchecked Senda
     #endif
 
     public init() {
-        self.tier = Self.detectTier()
+        #if arch(arm64)
+        self.tier = .mlx
+        // Check Apple Intelligence availability off the main thread.
+        // SystemLanguageModel.default can block/hang without the entitlement.
+        Task.detached(priority: .background) {
+            let resolved = Self.detectAppleIntelligenceTier()
+            await MainActor.run { [weak self] in self?.tier = resolved }
+        }
+        #else
+        self.tier = .unavailable
+        #endif
     }
 
     // MARK: - Tier detection
 
-    public static func detectTier() -> SummarizationTier {
+    /// Called from a background task — never call on the main thread.
+    public static func detectAppleIntelligenceTier() -> SummarizationTier {
         #if arch(arm64)
         #if canImport(FoundationModels)
         if #available(macOS 26.0, *) {
-            if Self.isAppleIntelligenceAvailable() {
+            if isAppleIntelligenceAvailable() {
                 return .appleIntelligence
             }
         }
@@ -78,13 +94,27 @@ public final class LocalSummarizationService: ObservableObject, @unchecked Senda
 
     // MARK: - MLX model management
 
-    /// Downloads and loads the MLX language model, if not already loaded.
-    /// No-op on Tier 1 (Apple Intelligence handles itself).
+    // Persisted set of model IDs whose files are confirmed on disk.
+    private static let mlxDownloadedKey = "com.autoscribe.downloadedMLXModels"
+    private var downloadedMLXModels: Set<String> {
+        get { Set(UserDefaults.standard.stringArray(forKey: Self.mlxDownloadedKey) ?? []) }
+        set { UserDefaults.standard.set(Array(newValue), forKey: Self.mlxDownloadedKey) }
+    }
+
+    /// Restores ready state at app launch without touching the network.
+    public func checkIfMLXDownloaded(modelID: String) {
+        if downloadedMLXModels.contains(modelID) {
+            mlxDownloadState = .ready
+        }
+    }
+
+    /// Downloads model files only — no MLX loading into memory.
+    /// The container is loaded lazily the first time summarization is needed.
     public func prepareMLXModel(modelID: String) async throws {
         guard tier == .mlx else { return }
 
         #if arch(arm64)
-        if loadedMLXModelID == modelID, mlxContainer != nil {
+        if downloadedMLXModels.contains(modelID) || (loadedMLXModelID == modelID && mlxContainer != nil) {
             await setMLXState(.ready)
             return
         }
@@ -92,19 +122,17 @@ public final class LocalSummarizationService: ObservableObject, @unchecked Senda
         await setMLXState(.downloading(progress: 0.0))
 
         do {
-            let config = ModelConfiguration(id: modelID)
-            let container = try await LLMModelFactory.shared.loadContainer(
-                from: #hubDownloader(),
-                using: #huggingFaceTokenizerLoader(),
-                configuration: config
-            ) { [weak self] progress in
+            // HubApi.snapshot fetches files to the local HuggingFace cache with no
+            // MLX/CoreML work — safe on low-RAM devices.
+            _ = try await HubApi().snapshot(from: modelID) { [weak self] progress in
                 Task { await self?.setMLXState(.downloading(progress: progress.fractionCompleted)) }
             }
-            mlxContainer = container
-            loadedMLXModelID = modelID
+            var saved = downloadedMLXModels
+            saved.insert(modelID)
+            downloadedMLXModels = saved
             await setMLXState(.ready)
         } catch {
-            let message = "Could not load language model '\(modelID)': \(error.localizedDescription)"
+            let message = "Could not download language model '\(modelID)': \(error.localizedDescription)"
             await setMLXState(.failed(message))
             throw ProcessingProviderError.localModelNotReady(message)
         }
@@ -169,12 +197,34 @@ public final class LocalSummarizationService: ObservableObject, @unchecked Senda
         modelID: String
     ) async throws -> MeetingSummary {
         #if arch(arm64)
+        // Lazy-load: files are on disk but container not yet in memory
         if mlxContainer == nil || loadedMLXModelID != modelID {
-            try await prepareMLXModel(modelID: modelID)
+            guard downloadedMLXModels.contains(modelID) else {
+                throw ProcessingProviderError.localModelNotReady(
+                    "MLX language model is not downloaded. Open Settings and tap Download."
+                )
+            }
+            await setMLXState(.loading)
+            do {
+                let config = ModelConfiguration(id: modelID)
+                let container = try await LLMModelFactory.shared.loadContainer(
+                    from: #hubDownloader(),
+                    using: #huggingFaceTokenizerLoader(),
+                    configuration: config
+                ) { _ in }
+                mlxContainer = container
+                loadedMLXModelID = modelID
+                await setMLXState(.ready)
+            } catch {
+                let message = "Could not load language model '\(modelID)': \(error.localizedDescription)"
+                await setMLXState(.failed(message))
+                throw ProcessingProviderError.localModelNotReady(message)
+            }
         }
+
         guard let container = mlxContainer else {
             throw ProcessingProviderError.localModelNotReady(
-                "MLX language model is not loaded. Download it in Settings > Local Model."
+                "MLX language model failed to load."
             )
         }
 

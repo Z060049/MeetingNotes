@@ -52,6 +52,7 @@ public final class AutoScribeController: ObservableObject {
         Task { @MainActor in
             self.addDiagnostic("Controller initialized. Output folder: \(self.settings.outputDirectory.path)")
         }
+        manager.checkDownloadStatus(whisperModel: loadedSettings.whisperModel, mlxModelID: loadedSettings.localLLMModel)
     }
 
     // MARK: - Provider factory

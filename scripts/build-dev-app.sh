@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUILD_DIR="$ROOT_DIR/.build/debug"
+BUILD_DIR="$ROOT_DIR/.build/arm64-apple-macosx/debug"
 APP_DIR="$ROOT_DIR/.build/AutoScribe.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
@@ -11,9 +11,48 @@ RESOURCES_DIR="$CONTENTS_DIR/Resources"
 cd "$ROOT_DIR"
 swift build
 
+# ── Compile MLX Metal shaders ──────────────────────────────────────────────
+# swift build doesn't compile .metal files; we do it here with xcrun metal.
+# MLX looks for default.metallib inside mlx-swift_Cmlx.bundle/Contents/Resources/
+METALLIB_CACHE="$ROOT_DIR/.build/mlx_metallib_cache"
+METALLIB_OUT="$METALLIB_CACHE/default.metallib"
+MLX_METAL_SRC="$ROOT_DIR/.build/checkouts/mlx-swift/Source/Cmlx/mlx-generated/metal"
+
+if [ ! -f "$METALLIB_OUT" ]; then
+  echo "Compiling MLX Metal shaders (first time, may take a minute)..."
+  mkdir -p "$METALLIB_CACHE/air"
+  SDK=$(xcrun --sdk macosx --show-sdk-path)
+  AIR_FILES=()
+  for metal_file in "$MLX_METAL_SRC"/*.metal; do
+    name=$(basename "$metal_file" .metal)
+    air_file="$METALLIB_CACHE/air/${name}.air"
+    xcrun -sdk macosx metal -c "$metal_file" -o "$air_file" \
+      -target air64-apple-macos14.0 -O2 2>/dev/null || true
+    [ -f "$air_file" ] && AIR_FILES+=("$air_file")
+  done
+  if [ ${#AIR_FILES[@]} -gt 0 ]; then
+    xcrun -sdk macosx metallib "${AIR_FILES[@]}" -o "$METALLIB_OUT"
+    echo "MLX metallib compiled: $METALLIB_OUT"
+  else
+    echo "Warning: No Metal air files compiled, MLX GPU acceleration unavailable"
+  fi
+else
+  echo "MLX metallib already compiled (cached)"
+fi
+
 rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 cp "$BUILD_DIR/AutoScribe" "$MACOS_DIR/AutoScribe"
+
+# Bundle the MLX metallib so MLX can find it at runtime
+if [ -f "$METALLIB_OUT" ]; then
+  MLX_BUNDLE="$RESOURCES_DIR/mlx-swift_Cmlx.bundle"
+  mkdir -p "$MLX_BUNDLE/Contents/Resources"
+  cp "$METALLIB_OUT" "$MLX_BUNDLE/Contents/Resources/default.metallib"
+  # Also place it next to binary (MLX searches there too)
+  cp "$METALLIB_OUT" "$MACOS_DIR/default.metallib"
+  echo "Bundled MLX metallib"
+fi
 
 if [ -f "$ROOT_DIR/.env" ]; then
   cp "$ROOT_DIR/.env" "$RESOURCES_DIR/.env"

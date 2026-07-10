@@ -5,42 +5,44 @@ import SwiftUI
 struct MenuBarRootView: View {
     @ObservedObject var controller: AutoScribeController
     @State private var showingSettings = false
-    @State private var showingDiagnostics = true
+    @State private var showingDiagnostics = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            header
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                header
 
-            if !controller.settings.hasAcceptedConsentChecklist {
-                ConsentChecklistView(controller: controller)
-            } else {
-                controls
+                if !controller.settings.hasAcceptedConsentChecklist {
+                    ConsentChecklistView(controller: controller)
+                } else {
+                    controls
+                }
+
+                if let error = controller.lastError {
+                    Text(error)
+                        .font(.callout)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Divider()
+
+                Button("Settings") {
+                    showingSettings = true
+                }
+
+                DisclosureGroup("Debug", isExpanded: $showingDiagnostics) {
+                    DiagnosticsView(controller: controller)
+                        .padding(.top, 6)
+                }
+
+                Button("Quit AutoScribe") {
+                    NSApplication.shared.terminate(nil)
+                }
             }
-
-            if let error = controller.lastError {
-                Text(error)
-                    .font(.callout)
-                    .foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Divider()
-
-            Button("Settings") {
-                showingSettings = true
-            }
-
-            DisclosureGroup("Debug", isExpanded: $showingDiagnostics) {
-                DiagnosticsView(controller: controller)
-                    .padding(.top, 6)
-            }
-
-            Button("Quit AutoScribe") {
-                NSApplication.shared.terminate(nil)
-            }
+            .padding()
+            .frame(width: 460)
         }
-        .padding()
-        .frame(width: 460)
         .sheet(isPresented: $showingSettings) {
             SettingsView(controller: controller)
         }

@@ -20,20 +20,64 @@ public enum ModelDownloadState: Sendable, Equatable {
 /// Wraps WhisperKit for on-device speech-to-text transcription.
 ///
 /// Model download and loading happen explicitly via `prepareModel(_:)` before
-/// any call to `transcribe(files:modelSize:)`.
+/// any call to `transcribe(files:modelSize:)`. The pipeline is loaded lazily
+/// at first transcription so that restarts are fast — the state machine tracks
+/// whether model files are present on disk independently of whether the model
+/// is loaded into memory.
 public final class WhisperKitTranscriptionService: ObservableObject, @unchecked Sendable {
     @Published public private(set) var downloadState: ModelDownloadState = .notDownloaded
 
     private var pipeline: WhisperKit?
-    private var loadedSize: WhisperModelSize?
+    private var onDiskSize: WhisperModelSize?  // files present on disk
+    private var loadedSize: WhisperModelSize?  // pipeline loaded in memory
+    private var modelFolderURL: URL?           // returned by WhisperKit.download()
+
+    // Persisted set of model rawValues confirmed downloaded to disk.
+    private static let udKey = "com.autoscribe.downloadedWhisperModels"
+    private static let udFolderKey = "com.autoscribe.whisperModelFolderURL"
+    private var downloadedOnDisk: Set<String> {
+        get { Set(UserDefaults.standard.stringArray(forKey: Self.udKey) ?? []) }
+        set { UserDefaults.standard.set(Array(newValue), forKey: Self.udKey) }
+    }
+    private var persistedFolderURL: URL? {
+        get {
+            guard let path = UserDefaults.standard.string(forKey: Self.udFolderKey) else { return nil }
+            return URL(fileURLWithPath: path)
+        }
+        set { UserDefaults.standard.set(newValue?.path, forKey: Self.udFolderKey) }
+    }
 
     public init() {}
 
     // MARK: - Model management
 
-    /// Downloads and loads the requested Whisper model, if not already loaded.
+    /// Restores ready state at app launch without touching the network.
+    /// Returns immediately if the model was previously downloaded on this machine.
+    public func checkIfDownloaded(_ size: WhisperModelSize) {
+        guard downloadedOnDisk.contains(size.rawValue) else { return }
+        onDiskSize = size
+
+        if let url = persistedFolderURL, FileManager.default.fileExists(atPath: url.path) {
+            modelFolderURL = url
+        } else {
+            // Reconstruct the path from WhisperKit's known folder layout.
+            // WhisperKit.download() stores to Documents/huggingface/models/argmaxinc/whisperkit-coreml/<model>
+            let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+            let reconstructed = documents
+                .appendingPathComponent("huggingface/models/argmaxinc/whisperkit-coreml/openai_whisper-\(size.rawValue)")
+            if FileManager.default.fileExists(atPath: reconstructed.path) {
+                modelFolderURL = reconstructed
+                persistedFolderURL = reconstructed
+            }
+        }
+
+        downloadState = .ready
+    }
+
+    /// Downloads (if needed) and marks the model as ready. The pipeline is
+    /// loaded lazily at the first call to `transcribe`.
     public func prepareModel(_ size: WhisperModelSize) async throws {
-        if loadedSize == size, pipeline != nil {
+        if onDiskSize == size || (loadedSize == size && pipeline != nil) {
             await setDownloadState(.ready)
             return
         }
@@ -41,41 +85,96 @@ public final class WhisperKitTranscriptionService: ObservableObject, @unchecked 
         await setDownloadState(.downloading(progress: 0.0))
 
         do {
-            // WhisperKit downloads the model to its CoreML cache on first use.
-            // Subsequent calls load from disk without re-downloading.
             await setDownloadState(.loading)
-            let pipe = try await WhisperKit(
-                model: size.modelIdentifier,
-                verbose: false,
-                logLevel: .none,
-                prewarm: true,
-                load: true,
-                download: true
-            )
-            pipeline = pipe
-            loadedSize = size
+            // Use the static download API — no pipeline instantiation, no CoreML
+            // compilation, no memory spike. Just fetches model files to the cache.
+            let folderURL = try await WhisperKit.download(variant: size.modelIdentifier)
+            onDiskSize = size
+            modelFolderURL = folderURL
+            var saved = downloadedOnDisk
+            saved.insert(size.rawValue)
+            downloadedOnDisk = saved
+            persistedFolderURL = folderURL
+            await setDownloadState(.ready)
             await setDownloadState(.ready)
         } catch {
-            let message = "Could not load Whisper model '\(size.rawValue)': \(error.localizedDescription)"
+            let message = "Could not download Whisper model '\(size.rawValue)': \(error.localizedDescription)"
             await setDownloadState(.failed(message))
             throw ProcessingProviderError.localModelNotReady(message)
         }
     }
 
-    /// Returns whether a given model size is currently loaded and ready.
-    public var isReady: Bool { downloadState == .ready && pipeline != nil }
+    /// Files are on disk (ready state). Pipeline may still need to be loaded
+    /// in memory — that happens lazily inside `transcribe`.
+    public var isReady: Bool { downloadState == .ready }
+
+    /// Releases the in-memory pipeline to free RAM before a large MLX model loads.
+    public func releaseModel() {
+        pipeline = nil
+        loadedSize = nil
+    }
 
     // MARK: - Transcription
 
     /// Transcribes all eligible audio files from a recording session.
+    ///
+    /// If the model files are on disk but the pipeline hasn't been loaded into
+    /// memory yet (e.g. after a restart), this loads the pipeline first.
     public func transcribe(
         files: [CapturedAudioFile],
         modelSize: WhisperModelSize
     ) async throws -> Transcript {
-        guard let pipeline, loadedSize == modelSize else {
-            throw ProcessingProviderError.localModelNotReady(
-                "Whisper model '\(modelSize.displayName)' is not loaded. Prepare it first."
-            )
+        // Lazy-load the pipeline if files are on disk but not yet in memory.
+        if pipeline == nil || loadedSize != modelSize {
+            guard onDiskSize == modelSize else {
+                throw ProcessingProviderError.localModelNotReady(
+                    "Whisper model '\(modelSize.displayName)' is not downloaded. Open Settings → Download."
+                )
+            }
+            await setDownloadState(.loading)
+            do {
+                let computeOptions = ModelComputeOptions(
+                    audioEncoderCompute: .cpuOnly,
+                    textDecoderCompute: .cpuOnly
+                )
+                let pipe: WhisperKit
+                if let folderURL = modelFolderURL {
+                    print("[WhisperKit] Loading from folder: \(folderURL.path)")
+                    pipe = try await WhisperKit(
+                        modelFolder: folderURL.path,
+                        computeOptions: computeOptions,
+                        verbose: true,
+                        logLevel: .debug,
+                        prewarm: false,
+                        load: true,
+                        download: false
+                    )
+                    print("[WhisperKit] Loaded successfully")
+                } else {
+                    print("[WhisperKit] No folder URL, using model identifier with download:true")
+                    pipe = try await WhisperKit(
+                        model: modelSize.modelIdentifier,
+                        computeOptions: computeOptions,
+                        verbose: true,
+                        logLevel: .debug,
+                        prewarm: false,
+                        load: true,
+                        download: true
+                    )
+                    print("[WhisperKit] Loaded successfully via model identifier")
+                }
+                pipeline = pipe
+                loadedSize = modelSize
+                await setDownloadState(.ready)
+            } catch {
+                let message = "Could not load Whisper model '\(modelSize.rawValue)': \(error.localizedDescription)"
+                await setDownloadState(.failed(message))
+                throw ProcessingProviderError.localModelNotReady(message)
+            }
+        }
+
+        guard let pipeline else {
+            throw ProcessingProviderError.localModelNotReady("Pipeline unavailable.")
         }
 
         var segments: [TranscriptSegment] = []

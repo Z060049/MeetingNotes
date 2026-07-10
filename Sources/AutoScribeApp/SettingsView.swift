@@ -186,11 +186,15 @@ struct SettingsView: View {
             TextField("HuggingFace model ID", text: $settings.localLLMModel)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(.caption, design: .monospaced))
+            Text("Default: Qwen2.5-0.5B (~300 MB). For better quality try Qwen2.5-1.5B-Instruct-4bit (~900 MB).")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             HStack(spacing: 8) {
                 mlxStateView
                 if localModelManager.mlxDownloadState != .ready {
-                    Button("Download (~2 GB)") {
+                    Button("Download (~\(mlxModelSizeHint))") {
                         Task {
                             mlxError = nil
                             do {
@@ -288,6 +292,15 @@ struct SettingsView: View {
         if case .downloading = localModelManager.mlxDownloadState { return true }
         if case .loading = localModelManager.mlxDownloadState { return true }
         return false
+    }
+
+    private var mlxModelSizeHint: String {
+        let id = settings.localLLMModel.lowercased()
+        if id.contains("0.5b") { return "~300 MB" }
+        if id.contains("1.5b") { return "~900 MB" }
+        if id.contains("3b")   { return "~1.8 GB" }
+        if id.contains("phi-3.5") || id.contains("phi-3-mini") { return "~2 GB" }
+        return "large"
     }
 
     private func chooseOutputFolder() {

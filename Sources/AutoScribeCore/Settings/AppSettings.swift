@@ -44,7 +44,7 @@ public struct AppSettings: Equatable, Sendable {
         shouldShowConsentReminder: Bool = true,
         hasAcceptedConsentChecklist: Bool = false,
         whisperModel: WhisperModelSize = .baseEn,
-        localLLMModel: String = "mlx-community/Phi-3.5-mini-instruct-4bit"
+        localLLMModel: String = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
     ) {
         self.processingMode = processingMode
         self.outputDirectory = outputDirectory

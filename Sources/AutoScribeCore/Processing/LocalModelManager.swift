@@ -18,11 +18,13 @@ public final class LocalModelManager: ObservableObject, @unchecked Sendable {
     @Published public private(set) var whisperDownloadState: ModelDownloadState = .notDownloaded
     @Published public private(set) var mlxDownloadState: ModelDownloadState = .notDownloaded
 
-    /// The summarization backend that will be used on this device.
-    public let summarizationTier: SummarizationTier
+    /// The summarization backend active on this device. Starts as `.mlx` and
+    /// may update asynchronously to `.appleIntelligence` after startup.
+    @Published public private(set) var summarizationTier: SummarizationTier = .mlx
 
     private var whiskerObserver: AnyCancellable?
     private var mlxObserver: AnyCancellable?
+    private var tierObserver: AnyCancellable?
 
     public init() {
         let transcription = WhisperKitTranscriptionService()
@@ -30,7 +32,6 @@ public final class LocalModelManager: ObservableObject, @unchecked Sendable {
 
         self.transcriptionService = transcription
         self.summarizationService = summarization
-        self.summarizationTier = summarization.tier
 
         // Mirror sub-service @Published state to our own published properties
         // so callers only need to observe LocalModelManager.
@@ -44,12 +45,19 @@ public final class LocalModelManager: ObservableObject, @unchecked Sendable {
         mlxObserver = summarization.objectWillChange.sink { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.mlxDownloadState = summarization.mlxDownloadState
+                self?.summarizationTier = summarization.tier
                 self?.objectWillChange.send()
             }
         }
     }
 
     // MARK: - Actions
+
+    /// Called at app startup to restore download state without re-downloading.
+    public func checkDownloadStatus(whisperModel: WhisperModelSize, mlxModelID: String) {
+        transcriptionService.checkIfDownloaded(whisperModel)
+        summarizationService.checkIfMLXDownloaded(modelID: mlxModelID)
+    }
 
     /// Loads (and downloads if needed) the selected Whisper model.
     public func prepareWhisperModel(_ size: WhisperModelSize) async throws {

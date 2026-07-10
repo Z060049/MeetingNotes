@@ -50,6 +50,9 @@ public final class LocalProcessingProvider: ProcessingProvider, @unchecked Senda
             )
         }
 
+        // Free Whisper from memory before loading the LLM to avoid unified-memory pressure.
+        transcriptionService.releaseModel()
+
         // Step 3 — summarize using the active tier
         let summary = try await summarizationService.summarize(
             transcript: cleaned,
