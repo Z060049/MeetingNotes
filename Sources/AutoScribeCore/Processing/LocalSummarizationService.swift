@@ -231,7 +231,17 @@ public final class LocalSummarizationService: ObservableObject, @unchecked Senda
         let prompt = buildPrompt(transcript: transcript, depth: depth)
 
         do {
-            let session = ChatSession(container)
+            // Some local models do not reliably emit an end-of-sequence token.
+            // Always enforce an application-level limit so summarization cannot
+            // generate indefinitely.
+            let generationParameters = GenerateParameters(
+                maxTokens: maximumOutputTokens(for: depth),
+                temperature: 0
+            )
+            let session = ChatSession(
+                container,
+                generateParameters: generationParameters
+            )
             let output = try await session.respond(to: prompt)
             return try parseSummaryFromText(output)
         } catch {
@@ -244,6 +254,14 @@ public final class LocalSummarizationService: ObservableObject, @unchecked Senda
             "MLX requires Apple Silicon. Please switch to API mode."
         )
         #endif
+    }
+
+    private func maximumOutputTokens(for depth: SummaryDepth) -> Int {
+        switch depth {
+        case .brief: 384
+        case .standard: 640
+        case .detailed: 1_024
+        }
     }
 
     // MARK: - Prompt building

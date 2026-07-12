@@ -43,4 +43,11 @@ public enum AppState: Equatable, Sendable {
         }
         return false
     }
+
+    public var isProcessing: Bool {
+        if case .processing = self {
+            return true
+        }
+        return false
+    }
 }

@@ -7,33 +7,39 @@ AutoScribe is a macOS background app that captures both sides of a conversation 
 It is designed for real-world meeting workflows where built-in recording is unavailable or restricted (Zoom, Google Meet/Hangouts, Microsoft Teams, phone calls via MacBook audio).
 
 Core value:
+
 - Universal capture independent of meeting platform
 - Fast, searchable Markdown output for Obsidian or any notes app
 - Optional privacy-first local processing mode
 
 ## Current implementation status
 
-Status as of Jun 24, 2026:
+Status as of Jul 12, 2026:
+
 - Native macOS Swift/SwiftUI menu-bar MVP has been implemented.
 - The app currently runs as a local development `.app` bundle built from Swift Package Manager.
 - Manual menu-bar recording works for the tested happy path.
 - Microphone and system audio are captured into separate temporary files.
 - OpenAI API mode can transcribe, summarize, and export Markdown successfully.
+- Local transcription with WhisperKit and local summarization with Foundation Models or MLX have been implemented and tested end-to-end.
 - Markdown output has been validated with a short real recording and saved to `~/Documents/AutoScribe/`.
-- Local processing remains deferred.
+- Broader reliability testing, UX simplification, and production packaging remain outstanding.
 
 Current development workflow:
+
 - Build the local test app with `./scripts/build-dev-app.sh`.
 - Launch the app with `open .build/AutoScribe.app`.
 - For shortcut testing, grant Accessibility permission to `.build/AutoScribe.app`.
 - Store the OpenAI API key through the app settings UI; the key is saved in macOS Keychain.
 
 Validated output example:
+
 - A short recording successfully generated a Markdown file with metadata, summary sections, and separate `Microphone` / `System Audio` transcript sections.
 
 ## 2) Problem statement
 
 People regularly lose important meeting details because:
+
 - Recording is not permitted by host settings
 - Notes are incomplete while multitasking in live calls
 - Existing tools are tied to specific meeting platforms
@@ -43,6 +49,7 @@ Users need a single Mac-native tool that works everywhere, starts/stops quickly,
 ## 3) Goals and non-goals
 
 ### Goals
+
 - Run as a lightweight background macOS app
 - Start/stop capture quickly via keyboard shortcut (double-tap Command key)
 - Capture dual audio streams:
@@ -57,6 +64,7 @@ Users need a single Mac-native tool that works everywhere, starts/stops quickly,
   - Third-party API path (simpler to ship first)
 
 ### Implementation choices made for MVP
+
 - App stack: native macOS Swift/SwiftUI menu-bar app.
 - Packaging during development: Swift Package Manager executable wrapped into a local `.app` bundle.
 - API provider: OpenAI for speech-to-text and summarization.
@@ -67,6 +75,7 @@ Users need a single Mac-native tool that works everywhere, starts/stops quickly,
 - Speaker labeling in MVP: best-effort by capture stream (`Microphone` vs `System Audio`), not true diarization.
 
 ### Non-goals (v1)
+
 - Live captions in-call
 - Collaborative/shared notes
 - Mobile app support
@@ -92,6 +101,7 @@ Users need a single Mac-native tool that works everywhere, starts/stops quickly,
 ## 6) Functional requirements
 
 ### 6.1 Recording control
+
 - Global hotkey: double-tap Command key to start/stop recording
 - First-run UX should explain that double-tap Command requires macOS Accessibility permission.
 - If Accessibility permission is not granted, manual menu-bar start/stop should still work.
@@ -105,6 +115,7 @@ Users need a single Mac-native tool that works everywhere, starts/stops quickly,
 - Optional confirmation sound or toast on start/stop
 
 ### 6.2 Audio capture
+
 - Capture microphone input stream
 - Capture system audio/output stream
 - Timestamp and merge streams for aligned transcription context
@@ -112,6 +123,7 @@ Users need a single Mac-native tool that works everywhere, starts/stops quickly,
 - Store temporary audio safely, then clean up after processing
 
 ### 6.3 Transcription + summarization
+
 - Transcribe meeting audio into diarized or speaker-labeled text where possible
 - For MVP, label transcript segments by capture source (`Microphone`, `System Audio`) rather than full speaker diarization.
 - Produce meeting summary with:
@@ -122,6 +134,7 @@ Users need a single Mac-native tool that works everywhere, starts/stops quickly,
 - Generate Markdown output with consistent template
 
 ### 6.4 File output
+
 - Save `.md` output to configurable folder (default: `~/Documents/AutoScribe/`)
 - Filename format: `YYYY-MM-DD_HH-mm_<meeting-title-or-generic>.md`
 - Include metadata header:
@@ -131,6 +144,7 @@ Users need a single Mac-native tool that works everywhere, starts/stops quickly,
   - Audio sources captured
 
 ### 6.5 Settings
+
 - Toggle processing mode (Local vs API)
 - Configure inactivity timeout (default 5 min)
 - Configure output folder
@@ -163,45 +177,56 @@ Users need a single Mac-native tool that works everywhere, starts/stops quickly,
 ## 9) Technical approaches
 
 ## 9.1 Path A: API-first (faster MVP)
+
 Pros:
+
 - Faster implementation and time-to-market
 - Lower local compute requirements
 - Better out-of-the-box transcription quality with managed models
 
 Cons:
+
 - Ongoing API cost
 - Privacy concerns for some users
 - Internet dependency
 
 Recommended for:
+
 - MVP launch to validate demand quickly
 
 ## 9.2 Path B: Local-first (privacy moat)
+
 Pros:
+
 - Strong privacy positioning ("notes never leave your machine")
 - No per-minute API costs
 - Works offline (for processing once recording is available)
 
 Cons:
+
 - Higher engineering complexity
 - Model packaging/performance constraints on lower-end Macs
 - More QA complexity across Apple Silicon generations
 
 Recommended for:
+
 - v1.5/v2 after MVP validation, or parallel track if resourced
 
 ## 10) Suggested rollout strategy
 
 Phase 1 (MVP, 4-8 weeks):
+
 - Implement stable dual-source recording
 - Ship API-based transcription + summary
 - Deliver Markdown export and core settings
 
 Phase 2:
+
 - Improve speaker labeling, summary quality, and reliability
 - Add better post-meeting structure templates
 
 Phase 3:
+
 - Introduce local processing beta mode
 - Benchmark accuracy/speed/cost vs API mode
 - Promote privacy-first value in product messaging
@@ -272,115 +297,110 @@ Phase 3:
 - System audio capture needs broader manual testing across Zoom, Google Meet, Teams, browser playback, speakers, wired headphones, AirPods/Bluetooth routes, and phone-call routing.
 - Multilingual support (e.g. Mandarin) is only partial: Whisper transcription auto-detects and works, but (a) the summary language is not pinned to the transcript's language, (b) the transcript de-duplication sentence splitter only handles ASCII `.!?` and misses full-width CJK punctuation (`。！？`), and (c) the Whisper request sends an English hint prompt. Action item: pin summary language to the transcript, add CJK punctuation to the de-dup splitter, and drop/localize the Whisper hint prompt.
 - Keychain prompts are visible in the development build and may need a clearer production signing/access-group setup.
-- Local processing mode is not implemented.
+- Local processing works end-to-end but still needs broader reliability and performance validation.
 - Auto-start at login is not implemented.
 - Long recordings are not chunked yet, so latency and API limits need more work.
 
-## 12.3 Next implementation plan
+## 12.3 Next steps
 
-The project is currently at a working MVP prototype stage. Next work should prioritize stabilization before adding major new features.
+This is the single authoritative backlog and execution order for the project. Detailed product requirements remain in their respective sections, but sequencing should be maintained here.
 
-### Track 1: Testing checklist and validation
+### Step 1: Testing and validation
 
-Goal: establish a repeatable test matrix so future fixes can be verified consistently.
+Establish a repeatable pass/fail matrix before adding more features:
 
-Checklist:
 - Mic-only recording with no Mac output audio.
-- System-audio-only recording using browser playback, e.g. YouTube.
-- Combined mic + system-audio recording.
-- Zoom recording test.
-- Google Meet recording test.
-- Microsoft Teams recording test.
-- Headphones/AirPods vs MacBook speakers.
+- System-audio-only recording using browser playback.
+- Combined mic and system-audio recording.
+- Zoom, Google Meet, and Microsoft Teams.
+- MacBook speakers, wired headphones, and AirPods/Bluetooth.
 - Phone-call audio routed through the Mac.
-- Short recording under 30 seconds.
-- Longer recording over 5 minutes.
-- Inactivity auto-stop behavior.
+- Recordings under 30 seconds and over 5 minutes.
+- Inactivity auto-stop.
+- Both Local and API processing paths.
 
-Acceptance criteria:
-- Each test has a clear pass/fail result.
-- Diagnostics capture enough detail to explain failures.
-- Output Markdown is saved in the configured folder for successful tests.
+Done when each test has a recorded result, failures have useful diagnostics, and successful sessions create Markdown in the configured folder.
 
-### Track 2: Audio reliability hardening
+### Step 2: Audio reliability
 
-Goal: make capture and transcription reliable enough for real meetings.
+- Replace file-size-based silence detection with real audio-level or waveform analysis.
+- Do not transcribe empty or silent streams.
+- Handle headphones, speaker changes, and unplugged devices during recording.
+- Improve microphone, system-audio, and capture-failure diagnostics.
+- Preserve metadata describing which streams were captured, failed, or skipped.
 
-Work items:
-- Replace file-size-based system-audio silence detection with real audio-level or waveform analysis.
-- Avoid sending empty or silent streams to transcription.
-- Improve handling of mid-recording audio route changes, such as headphones, speaker changes, and unplugged devices.
-- Add clearer diagnostics for microphone permission, system-audio permission, and capture failures.
-- Preserve source-stream metadata so Markdown can explain which streams were captured and which were skipped.
+Done when silent audio cannot create hallucinated text, real system audio remains reliable, and microphone capture continues independently if system audio fails.
 
-Acceptance criteria:
-- Silent system audio does not produce hallucinated transcript text.
-- Real system audio is still captured and transcribed.
-- Mic capture continues to work independently if system audio fails.
+### Step 3: UX simplification and permission onboarding
 
-### Track 3: Permission and onboarding UX
+- Hide Debug/Diagnostics behind a developer flag.
+- Show only settings relevant to the active Local or API mode.
+- Replace separate Whisper and Qwen controls with one local-model setup flow.
+- Limit the main popover to status, Start/Stop, last output, and Quit.
+- Improve the consent and permission checklist.
+- Explain Accessibility, microphone, and system-audio permissions separately.
+- Keep manual recording available without shortcut permission.
+- Add recovery guidance for denied or stale permissions.
 
-Goal: make first-run setup understandable for non-technical users.
+Done when a new non-technical user can set up and complete a recording without understanding the underlying model pipeline.
 
-Work items:
-- Improve the first-run consent and permission checklist.
-- Explain why Accessibility permission is needed for double-tap Command.
-- Explain microphone and system-audio/screen-capture permissions separately.
-- Keep manual menu-bar recording available when shortcut permission is missing.
-- Add clearer recovery instructions when macOS permissions are denied or stale.
+### Step 4: Private beta
 
-Acceptance criteria:
-- A new user can understand what permissions are required and why.
-- The app clearly distinguishes optional shortcut permission from required recording permissions.
-- Permission state can be refreshed without restarting when possible.
+- Hand-install the development build for a small group of trusted testers.
+- Validate capture reliability and note quality in real Zoom, Meet, and Teams calls.
+- Collect structured feedback on setup friction, transcript usefulness, summary usefulness, and failures.
+- Do not embed a shared API key in the app; install keys individually or use a rate-limited proxy.
 
-### Track 4: Production app packaging
+Done when representative users can complete real meetings and the highest-frequency failures are understood.
 
-Goal: move from development `.app` bundle to a realistic distributable Mac app.
+### Step 5: Output quality
 
-Work items:
-- Create a proper macOS app bundle target or repeatable packaging pipeline.
-- Add app icon, bundle identifier, versioning, and usage descriptions.
-- Sign and eventually notarize the app.
-- Reduce confusing Keychain prompts through stable signing identity and bundle metadata.
-- Add launch-at-login support after the app bundle is stable.
-
-Acceptance criteria:
-- Users can launch AutoScribe as a normal Mac app.
-- AutoScribe appears cleanly in macOS permission lists.
-- The app can be shared for testing without requiring `swift run`.
-
-### Track 5: Output quality improvements
-
-Goal: make generated notes more consistently useful.
-
-Work items:
-- Improve Markdown template formatting.
-- Improve meeting title generation and filename cleanup.
-- Handle very short or empty recordings gracefully.
+- Improve Markdown formatting, title generation, and filename cleanup.
+- Handle short, empty, and failed recordings without misleading summaries.
 - Make summary depth visibly affect output.
-- Consider merging mic/system transcripts into a more readable timeline while preserving source labels.
+- Improve multilingual handling, including summary language, CJK sentence splitting, and Whisper prompts.
+- Evaluate a readable merged timeline while preserving source labels.
 
-Acceptance criteria:
-- Output is readable without manual cleanup for common meeting recordings.
-- Short tests do not produce misleading summaries.
-- Transcript and summary remain easy to cross-check.
+Done when common meeting outputs are useful without manual cleanup and remain easy to cross-check against the transcript.
 
-### Track 6: Processing scalability
+### Step 6: Processing scalability and resource monitoring
 
-Goal: support longer real-world meetings without brittle API behavior.
-
-Work items:
 - Add chunked transcription for long recordings.
-- Add processing progress indicators.
+- Show processing progress and useful retry/error states.
 - Handle API rate limits and retryable network failures.
-- Track approximate API cost per recording duration.
-- Keep local processing as a later track after API MVP stability.
+- Preserve raw temporary audio when processing fails so recovery is possible.
+- Track approximate API cost in API mode.
+- Monitor CPU, memory, processing time, and peak memory during local processing.
+- Warn non-blockingly when available memory is critically low.
 
-Acceptance criteria:
-- Long recordings process without hitting obvious file-size or timeout issues.
-- Users get useful progress/error feedback during processing.
-- Failed processing does not lose the raw temporary recording until recovery is possible.
+Done when long meetings process without obvious size or timeout failures and users can understand processing progress and resource cost.
+
+### Step 7: Production packaging
+
+- Obtain an Apple Developer account and signing certificate.
+- Create a proper app bundle with a stable identifier, icon, versioning, entitlements, and usage descriptions.
+- Bundle default Whisper and Qwen models and add bundle-path fallback loading.
+- Stabilize Keychain behavior under the production signing identity.
+- Add launch-at-login after the app bundle is stable.
+- Build, sign, notarize, and test the DMG.
+
+Done when AutoScribe can be installed as a normal Mac app, appears cleanly in permission lists, and passes Gatekeeper on a separate test Mac.
+
+### Step 8: Public release
+
+- Choose the final target audience and whether the project is commercial, open source, or both.
+- Make on-device transcription the default and keep cloud summarization optional and provider-swappable.
+- Publish the signed/notarized release with privacy, consent, hardware, and support documentation.
+- Define release metrics for activation, reliability, output quality, and engagement.
+
+Done when a new user can download, install, configure, and complete a meeting without developer assistance.
+
+### Deferred beyond the initial release
+
+- Configurable global shortcuts beyond double-Command.
+- Full speaker diarization.
+- Automatic CRM or task integrations.
+- Windows rewrite or an iOS/iPadOS companion app.
 
 ## 13) Open questions
 
@@ -395,6 +415,7 @@ Acceptance criteria:
 ## 14) MVP definition (ship criteria)
 
 AutoScribe MVP is ready when:
+
 - User can start/stop recording from global shortcut or menu bar
 - App reliably captures mic + system audio in common meeting apps
 - App auto-stops after configurable inactivity timeout
@@ -423,22 +444,26 @@ Therefore the prior decision before any distribution model is: where does transc
 ### 15.2 Evaluation of the two distribution options
 
 Option B — own API key, shared privately with friends:
+
 - Good only for fast validation; zero friction for testers, quick feedback.
 - Do not bake the API key into a distributed `.app` bundle; it is trivially extractable and the account can be drained. If used, keep the key behind a small rate-limited proxy or hand-install on each machine and accept paying their usage.
 - Does not scale and has no revenue path. This is a testing phase, not a strategy.
 
 Option A — open source on GitHub, BYOK:
+
 - Best long-term: zero cost to maintainer, no liability for user API spend, infinite scale, developer credibility, and a natural privacy story.
 - Frictions to plan for:
   - Audience filter: "get an OpenAI API key" excludes non-technical users; on-device transcription softens this a lot.
   - Distribution: unsigned Mac apps hit Gatekeeper; signing/notarization (Track 4) is not done.
   - Legal/consent: BYOK and/or on-device means the maintainer never touches user audio, which is a selling point, not just a cost saver.
 
-### 15.3 Recommended sequence
+### 15.3 Distribution principles
 
-1. Now: use Option B privately with a few friends to validate note quality and capture reliability across Zoom/Meet/Teams. Own key, hand-installed, no public binary.
-2. Before any public launch: move transcription on-device (Apple `SpeechAnalyzer` or `whisper.cpp`). Highest-leverage change: removes cost, removes the mandatory key, and creates the privacy differentiator versus Otter/Fireflies/Granola.
-3. Then open source (Option A) with on-device transcription by default, optional BYOK for a cloud summary (OpenAI or Claude, swappable), and a signed/notarized release so non-developers can run it.
+- Use private testing to validate reliability and note quality before public distribution.
+- Do not embed a shared API key in a distributed app.
+- Prefer on-device transcription by default, with optional provider-swappable cloud summarization.
+- Require a signed and notarized build before public distribution.
+- The authoritative execution sequence is maintained in Section 12.3.
 
 ### 15.4 Positioning
 
@@ -483,7 +508,7 @@ AutoScribe.dmg
 2. Drag to Applications
 3. Open — works immediately, offline, no setup
 
-### 16.4 "Update model" option in Settings
+### ·16.4 "Update model" option in Settings
 
 - Show the currently active model and its version
 - Let users download a larger model (e.g. Whisper `small`, Qwen `1.5B`) for better quality
@@ -497,13 +522,9 @@ AutoScribe.dmg
 4. **DMG creation script** — `create-dmg` or `hdiutil` to produce a signed, notarized `.dmg` with background image and Applications symlink
 5. **Model update check** — optional background check for newer bundled model versions; prompt user to download upgrade if available
 
-### 16.6 Execution order (deferred)
+### 16.6 Packaging scope
 
-1. Obtain Apple Developer account and certificate
-2. Add bundled-model fallback path to `WhisperKitTranscriptionService` and `LocalSummarizationService`
-3. Write release build script that copies models into the app bundle
-4. Notarize and create DMG
-5. Add "Update model" UI to Settings
+Packaging work is sequenced in Section 12.3. This section defines the target artifact and technical requirements only.
 
 ---
 
@@ -521,45 +542,46 @@ The current UI exposes too much at once — a mode toggle, separate download but
 
 ### 17.3 Specific changes
 
-| Area | Current | Target |
-|---|---|---|
-| Main popover | Shows Settings + Debug + Quit | Shows status, Start/Stop, last output path, Quit |
-| Debug panel | Expanded by default | Hidden by default; accessible via long-press or developer flag |
+
+| Area                  | Current                                                                         | Target                                                                                  |
+| --------------------- | ------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| Main popover          | Shows Settings + Debug + Quit                                                   | Shows status, Start/Stop, last output path, Quit                                        |
+| Debug panel           | Expanded by default                                                             | Hidden by default; accessible via long-press or developer flag                          |
 | Settings — Local mode | Shows MLX tier badge, model IDs, separate download buttons for Whisper and Qwen | Single "Download models" action; show combined progress; hide model IDs unless expanded |
-| Settings — API mode | Shows OpenAI key field alongside local model section | Only show the controls relevant to the active mode |
-| Mode switching | Available in Settings at any time | Available in Settings; warn if switching while models are downloading |
+| Settings — API mode   | Shows OpenAI key field alongside local model section                            | Only show the controls relevant to the active mode                                      |
+| Mode switching        | Available in Settings at any time                                               | Available in Settings; warn if switching while models are downloading                   |
 
-### 17.4 Execution order
 
-1. Collapse Debug panel and move behind a developer flag
-2. Simplify Settings to show only controls for the active mode
-3. Replace separate Whisper + Qwen download buttons with a single "Set up local models" flow
-4. Polish main popover to show only status, Start/Stop, and last result
+### 17.4 Delivery
+
+UX simplification work is sequenced in Section 12.3. This section defines the intended experience and scope only.
 
 ---
 
 ## 18. Resource Usage Monitoring
 
-### 17.1 Goal
+### 18.1 Goal
 
 Show the user real-time memory and CPU usage while the app is recording or processing, so they can see the cost of on-device AI and catch runaway resource usage early.
 
-### 17.2 What to monitor
+### 18.2 What to monitor
 
-| Metric | When | Why |
-|---|---|---|
-| RAM (RSS) | During recording and processing | On-device models use 300–800 MB; warn if system is low |
-| CPU % | During transcription and summarization | CPU-only Whisper inference can pin a core for 5–30s |
-| Processing time | After each recording | Helps user decide if they need a smaller/larger model |
-| Peak memory | After processing completes | Shown in the session summary |
 
-### 17.3 UX
+| Metric          | When                                   | Why                                                    |
+| --------------- | -------------------------------------- | ------------------------------------------------------ |
+| RAM (RSS)       | During recording and processing        | On-device models use 300–800 MB; warn if system is low |
+| CPU %           | During transcription and summarization | CPU-only Whisper inference can pin a core for 5–30s    |
+| Processing time | After each recording                   | Helps user decide if they need a smaller/larger model  |
+| Peak memory     | After processing completes             | Shown in the session summary                           |
+
+
+### 18.3 UX
 
 - Small live indicator in the popover (e.g. "RAM: 340 MB | CPU: 42%") visible during Processing state
 - After processing completes, show a one-line summary: "Transcribed in 8s · Summarized in 12s · Peak RAM 410 MB"
 - Warn (non-blocking toast) if system free RAM drops below 1 GB during processing
 
-### 17.4 Implementation notes
+### 18.4 Implementation notes
 
 - Use `task_info()` (mach) or `ProcessInfo` for CPU and RSS
 - Already have a `ResourceMonitor.swift` stub in the codebase — extend it
@@ -569,33 +591,37 @@ Show the user real-time memory and CPU usage while the app is recording or proce
 
 ## 19. Platform Support
 
-### 18.1 Current: macOS only
+### 19.1 Current: macOS only
 
 AutoScribe is macOS-exclusive. Every layer of the stack depends on Apple-only frameworks:
 
-| Component | Framework | Apple-only? |
-|---|---|---|
-| System audio capture | `ScreenCaptureKit` | Yes — macOS 12.3+ |
-| Microphone recording | `AVFoundation` | Yes |
-| Whisper transcription | `WhisperKit` + `CoreML` | Yes — Apple Silicon |
-| LLM summarization | `MLX` + Metal shaders | Yes — Apple Silicon |
-| Menu bar UI | `AppKit` + `NSStatusItem` | Yes — macOS |
-| Apple Intelligence | `FoundationModels` | Yes — macOS 26+ |
 
-### 18.2 Windows — not feasible as a port
+| Component             | Framework                 | Apple-only?         |
+| --------------------- | ------------------------- | ------------------- |
+| System audio capture  | `ScreenCaptureKit`        | Yes — macOS 12.3+   |
+| Microphone recording  | `AVFoundation`            | Yes                 |
+| Whisper transcription | `WhisperKit` + `CoreML`   | Yes — Apple Silicon |
+| LLM summarization     | `MLX` + Metal shaders     | Yes — Apple Silicon |
+| Menu bar UI           | `AppKit` + `NSStatusItem` | Yes — macOS         |
+| Apple Intelligence    | `FoundationModels`        | Yes — macOS 26+     |
+
+
+### 19.2 Windows — not feasible as a port
 
 A Windows version would be a complete rewrite, not a port. Equivalent Windows stack:
 
-| Component | Windows equivalent |
-|---|---|
-| System audio | WASAPI loopback capture |
+
+| Component     | Windows equivalent                     |
+| ------------- | -------------------------------------- |
+| System audio  | WASAPI loopback capture                |
 | Transcription | whisper.cpp + DirectML or ONNX Runtime |
-| LLM inference | llama.cpp or ONNX Runtime |
-| UI | WinUI 3, Electron, or Tauri |
+| LLM inference | llama.cpp or ONNX Runtime              |
+| UI            | WinUI 3, Electron, or Tauri            |
+
 
 This is a separate product with a separate codebase. Swift code cannot be reused. Not in scope.
 
-### 18.3 iOS / iPadOS — possible but limited
+### 19.3 iOS / iPadOS — possible but limited
 
 - `AVFoundation` and `CoreML` are available
 - `ScreenCaptureKit` is iOS 17+ but system audio capture from other apps is heavily restricted
@@ -603,11 +629,12 @@ This is a separate product with a separate codebase. Swift code cannot be reused
 - MLX works on iPhone 15 Pro+ (A17 Pro) and all M-chip iPads
 - Feasible as a future companion app, not a port
 
-### 18.4 Minimum Mac requirements
+### 19.4 Minimum Mac requirements
 
-| Requirement | Minimum | Recommended |
-|---|---|---|
-| macOS | 14.0 (Sonoma) | 26.0 (for Apple Intelligence) |
-| Chip | Apple Silicon (M1+) | M2+ for faster MLX inference |
-| RAM | 8 GB | 16 GB (headroom for large models) |
-| Storage | 1 GB free | 2 GB (room for model upgrades) |
+
+| Requirement | Minimum             | Recommended                       |
+| ----------- | ------------------- | --------------------------------- |
+| macOS       | 14.0 (Sonoma)       | 26.0 (for Apple Intelligence)     |
+| Chip        | Apple Silicon (M1+) | M2+ for faster MLX inference      |
+| RAM         | 8 GB                | 16 GB (headroom for large models) |
+| Storage     | 1 GB free           | 2 GB (room for model upgrades)    |

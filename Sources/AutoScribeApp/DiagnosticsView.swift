@@ -18,6 +18,16 @@ struct DiagnosticsView: View {
                 Button("Copy") {
                     copyDiagnostics()
                 }
+                Button("Open Log") {
+                    NSWorkspace.shared.activateFileViewerSelecting([PersistentDiagnosticLog.shared.logURL])
+                }
+                Button("Crash Reports") {
+                    try? FileManager.default.createDirectory(
+                        at: CrashLogManager.shared.reportDirectoryURL,
+                        withIntermediateDirectories: true
+                    )
+                    NSWorkspace.shared.open(CrashLogManager.shared.reportDirectoryURL)
+                }
                 Button("Clear") {
                     controller.clearDiagnostics()
                 }

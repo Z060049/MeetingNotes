@@ -20,6 +20,11 @@ MLX_METAL_SRC="$ROOT_DIR/.build/checkouts/mlx-swift/Source/Cmlx/mlx-generated/me
 
 if [ ! -f "$METALLIB_OUT" ]; then
   echo "Compiling MLX Metal shaders (first time, may take a minute)..."
+  if ! xcrun -sdk macosx metal --version >/dev/null 2>&1; then
+    echo "Error: Xcode's Metal Toolchain is not installed."
+    echo "Install it with: xcodebuild -downloadComponent MetalToolchain"
+    exit 1
+  fi
   mkdir -p "$METALLIB_CACHE/air"
   SDK=$(xcrun --sdk macosx --show-sdk-path)
   AIR_FILES=()
@@ -34,7 +39,8 @@ if [ ! -f "$METALLIB_OUT" ]; then
     xcrun -sdk macosx metallib "${AIR_FILES[@]}" -o "$METALLIB_OUT"
     echo "MLX metallib compiled: $METALLIB_OUT"
   else
-    echo "Warning: No Metal air files compiled, MLX GPU acceleration unavailable"
+    echo "Error: No Metal air files compiled; the local processing build is incomplete."
+    exit 1
   fi
 else
   echo "MLX metallib already compiled (cached)"

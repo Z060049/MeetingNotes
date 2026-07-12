@@ -56,4 +56,17 @@ public extension FileManager {
             .appendingPathComponent("Documents", isDirectory: true)
             .appendingPathComponent("AutoScribe", isDirectory: true)
     }
+
+    var autoScribeRecordingRecoveryDirectory: URL {
+        let applicationSupport = urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support", isDirectory: true)
+        return applicationSupport
+            .appendingPathComponent("AutoScribe", isDirectory: true)
+            .appendingPathComponent("Recording Recovery", isDirectory: true)
+    }
+
+    func autoScribeRecordingWorkspace(for sessionID: UUID) -> URL {
+        autoScribeRecordingRecoveryDirectory
+            .appendingPathComponent(sessionID.uuidString, isDirectory: true)
+    }
 }

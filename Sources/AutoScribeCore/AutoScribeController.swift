@@ -32,6 +32,10 @@ public final class AutoScribeController: ObservableObject {
     private var inactivityMonitor: InactivityMonitor?
     private var isStartingRecording = false
 
+    @MainActor public var isRecordingOrStarting: Bool {
+        state.isRecording || isStartingRecording
+    }
+
     public init(
         settingsStore: SettingsStore = SettingsStore(),
         audioCaptureService: DualAudioCaptureService = DualAudioCaptureService(),
@@ -51,6 +55,7 @@ public final class AutoScribeController: ObservableObject {
         )
         Task { @MainActor in
             self.addDiagnostic("Controller initialized. Output folder: \(self.settings.outputDirectory.path)")
+            self.reportRecoverableRecordings()
         }
         manager.checkDownloadStatus(whisperModel: loadedSettings.whisperModel, mlxModelID: loadedSettings.localLLMModel)
     }
@@ -112,9 +117,12 @@ public final class AutoScribeController: ObservableObject {
             return
         }
 
+        let sessionID = UUID()
         let session = RecordingSession(
+            id: sessionID,
             processingMode: settings.processingMode,
-            outputDirectory: settings.outputDirectory
+            outputDirectory: settings.outputDirectory,
+            temporaryDirectory: FileManager.default.autoScribeRecordingWorkspace(for: sessionID)
         )
 
         latestOutputURL = nil
@@ -167,6 +175,22 @@ public final class AutoScribeController: ObservableObject {
             } catch {
                 fail(error)
             }
+        }
+    }
+
+    @MainActor public func discardRecording() async -> Bool {
+        addDiagnostic("Discard recording requested during app termination.", level: .warning)
+        do {
+            let result = try await audioCaptureService.stop()
+            inactivityMonitor?.stop()
+            inactivityMonitor = nil
+            cleanupTemporaryFiles(for: result.session)
+            setState(.idle)
+            addDiagnostic("Recording discarded.")
+            return true
+        } catch {
+            fail(error)
+            return false
         }
     }
 
@@ -278,7 +302,9 @@ public final class AutoScribeController: ObservableObject {
     }
 
     @MainActor public func addDiagnostic(_ message: String, level: DiagnosticEvent.Level = .info) {
-        diagnostics.append(DiagnosticEvent(level: level, message: message))
+        let event = DiagnosticEvent(level: level, message: message)
+        diagnostics.append(event)
+        PersistentDiagnosticLog.shared.log(message, level: level, date: event.date)
         if diagnostics.count > 100 {
             diagnostics.removeFirst(diagnostics.count - 100)
         }
@@ -303,6 +329,9 @@ public final class AutoScribeController: ObservableObject {
         Summary depth: \(settings.summaryDepth.rawValue)
         Silence prompt after: \(Int(settings.inactivityTimeoutSeconds))s
         Last error: \(error)
+        Persistent log: \(PersistentDiagnosticLog.shared.logURL.path)
+        Crash reports: \(CrashLogManager.shared.reportDirectoryURL.path)
+        Recording recovery: \(FileManager.default.autoScribeRecordingRecoveryDirectory.path)
 
         Diagnostics:
         \(diagnosticsText)
@@ -311,7 +340,24 @@ public final class AutoScribeController: ObservableObject {
 
     @MainActor private func setState(_ state: AppState) {
         self.state = state
+        CrashLogManager.shared.updateState(state.title)
         addDiagnostic("State changed to \(state.title).")
+    }
+
+    @MainActor private func reportRecoverableRecordings() {
+        let directory = FileManager.default.autoScribeRecordingRecoveryDirectory
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ), !entries.isEmpty else {
+            return
+        }
+
+        addDiagnostic(
+            "Found \(entries.count) recoverable recording workspace(s) at \(directory.path).",
+            level: .warning
+        )
     }
 
     @MainActor private func logTranscriptionDecisions(for files: [CapturedAudioFile]) {

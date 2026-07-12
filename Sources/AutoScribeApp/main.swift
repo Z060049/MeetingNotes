@@ -3,6 +3,7 @@ import AutoScribeCore
 import Combine
 import SwiftUI
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let controller = AutoScribeController()
     private var statusItem: NSStatusItem?
@@ -11,8 +12,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var isShowingSilenceAlert = false
     private var isShowingProcessingAlert = false
     private var previousState: AppState = .idle
+    private var pendingTerminationAfterSave = false
+    private let automaticTerminationReason = "AutoScribe must remain active as a menu-bar recording app."
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        ProcessInfo.processInfo.disableAutomaticTermination(automaticTerminationReason)
+        PersistentDiagnosticLog.shared.log(
+            "Application launched. Automatic termination disabled. OS: \(ProcessInfo.processInfo.operatingSystemVersionString)"
+        )
+        if let incidentURL = CrashLogManager.shared.startSession(initialState: controller.state.title) {
+            PersistentDiagnosticLog.shared.log(
+                "Previous session ended unexpectedly. Crash report saved to \(incidentURL.path).",
+                level: .error
+            )
+        }
         NSApp.setActivationPolicy(.accessory)
         configureMainMenu()
         configureStatusItem()
@@ -20,6 +33,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         bindState()
         bindSilencePrompt()
         bindProcessingFailure()
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        PersistentDiagnosticLog.shared.log("Termination requested while state is \(controller.state.title).")
+        CrashLogManager.shared.recordTerminationRequest(state: controller.state.title)
+
+        if controller.isRecordingOrStarting {
+            return handleTerminationWhileRecording(sender)
+        }
+
+        if controller.state.isProcessing {
+            return handleTerminationWhileProcessing()
+        }
+
+        return .terminateNow
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        PersistentDiagnosticLog.shared.log("Application will terminate normally.")
+        if let incidentURL = CrashLogManager.shared.markCleanShutdown(finalState: controller.state.title) {
+            PersistentDiagnosticLog.shared.log(
+                "Termination occurred without a recorded quit request. Report saved to \(incidentURL.path).",
+                level: .warning
+            )
+        }
+        ProcessInfo.processInfo.enableAutomaticTermination(automaticTerminationReason)
     }
 
     private func configureStatusItem() {
@@ -81,6 +120,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if case .processing = previousState, case .complete = state {
             playCompletionSound()
         }
+
+        if pendingTerminationAfterSave {
+            switch state {
+            case .complete, .failed:
+                pendingTerminationAfterSave = false
+                PersistentDiagnosticLog.shared.log("Pending termination continuing after recording finalization.")
+                NSApp.reply(toApplicationShouldTerminate: true)
+            default:
+                break
+            }
+        }
+    }
+
+    private func handleTerminationWhileRecording(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "A recording is still in progress"
+        alert.informativeText = "Stop and save the recording before quitting, continue recording, or discard it."
+        alert.addButton(withTitle: "Stop and Save")
+        alert.addButton(withTitle: "Continue Recording")
+        alert.addButton(withTitle: "Quit and Discard")
+
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            pendingTerminationAfterSave = true
+            controller.stopRecording()
+            return .terminateLater
+        case .alertSecondButtonReturn:
+            PersistentDiagnosticLog.shared.log("Termination cancelled; recording continues.")
+            return .terminateCancel
+        default:
+            Task { @MainActor in
+                let discarded = await controller.discardRecording()
+                PersistentDiagnosticLog.shared.log(
+                    discarded
+                        ? "Recording discarded after confirmed quit."
+                        : "Recording discard failed; quitting with recovery workspace retained.",
+                    level: discarded ? .info : .warning
+                )
+                sender.reply(toApplicationShouldTerminate: true)
+            }
+            return .terminateLater
+        }
+    }
+
+    private func handleTerminationWhileProcessing() -> NSApplication.TerminateReply {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "AutoScribe is processing a recording"
+        alert.informativeText = "Quitting now may interrupt the transcript. Recovery audio will remain available."
+        alert.addButton(withTitle: "Continue Processing")
+        alert.addButton(withTitle: "Quit Now")
+
+        if alert.runModal() == .alertFirstButtonReturn {
+            PersistentDiagnosticLog.shared.log("Termination cancelled; processing continues.")
+            return .terminateCancel
+        }
+
+        PersistentDiagnosticLog.shared.log(
+            "User confirmed termination during processing; recovery workspace retained.",
+            level: .warning
+        )
+        return .terminateNow
     }
 
     private func playCompletionSound() {
@@ -173,6 +275,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-let appDelegate = AppDelegate()
-NSApplication.shared.delegate = appDelegate
-NSApplication.shared.run()
+MainActor.assumeIsolated {
+    let appDelegate = AppDelegate()
+    NSApplication.shared.delegate = appDelegate
+    NSApplication.shared.run()
+}
