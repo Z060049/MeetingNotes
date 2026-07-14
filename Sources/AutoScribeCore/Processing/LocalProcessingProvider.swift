@@ -22,7 +22,8 @@ public final class LocalProcessingProvider: ProcessingProvider, @unchecked Senda
 
     public func process(
         capture: AudioCaptureResult,
-        settings: AppSettings
+        settings: AppSettings,
+        onTranscriptReady: (@Sendable (Transcript) async -> Void)? = nil
     ) async throws -> ProcessingResult {
         guard settings.processingMode == .local else {
             throw ProcessingProviderError.localProcessingError(
@@ -49,6 +50,10 @@ public final class LocalProcessingProvider: ProcessingProvider, @unchecked Senda
                 "No speech was detected in the recording. Check that your microphone is working."
             )
         }
+
+        // Notify the controller that the transcript is ready before touching the LLM.
+        // This lets the controller write the raw transcript file as a safe fallback.
+        await onTranscriptReady?(cleaned)
 
         // Free Whisper from memory before loading the LLM to avoid unified-memory pressure.
         transcriptionService.releaseModel()

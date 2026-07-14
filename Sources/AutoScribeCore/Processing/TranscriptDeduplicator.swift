@@ -6,60 +6,60 @@ import Foundation
 /// microphone, producing near-identical sentences in both streams. This keeps
 /// the system-audio transcript as the source of truth and drops the duplicated
 /// sentences from the microphone transcript.
+///
+/// ## Deduplication strategy
+///
+/// **Timestamp-aware path** (local / WhisperKit processing):
+/// WhisperKit emits one `TranscriptSegment` per sub-segment, each with a
+/// `startTime`.  Because the microphone echo of a speaker's voice arrives within
+/// a few seconds of the original system-audio capture, we treat two segments as
+/// an echo when both of these conditions hold:
+///   1. Their `startTime` values are within `echoWindow` seconds of each other.
+///   2. Their normalised texts have a similarity ≥ `timestampedThreshold`
+///      (relaxed relative to the text-only threshold because the timing evidence
+///      is already strong).
+/// A mic segment with *no* system-audio segment nearby in time is guaranteed to
+/// be genuine speech and is kept unconditionally.
+///
+/// **Text-only path** (API / OpenAI Whisper, no timestamps):
+/// Falls back to the original sentence-level Jaccard + Levenshtein + bigram
+/// coverage approach when no timing data is present.
 public enum TranscriptDeduplicator {
-    public static let defaultThreshold = 0.95
+    public static let defaultThreshold: Double = 0.82
+
+    /// Maximum seconds between a system-audio segment and its microphone echo.
+    /// Acoustic delay from speaker to mic is typically < 500 ms; we use a
+    /// generous window to absorb Whisper chunking jitter.
+    public static let echoWindow: TimeInterval = 5.0
+
+    // MARK: - Public API
 
     public static func deduplicate(_ transcript: Transcript, threshold: Double = defaultThreshold) -> Transcript {
-        let referenceSentences = transcript.segments
-            .filter { $0.speaker == AudioSource.systemAudio.rawValue }
-            .flatMap { sentences(in: $0.text) }
-            .map { normalize($0) }
-            .filter { !$0.isEmpty }
+        let systemSegments = transcript.segments.filter { $0.speaker == AudioSource.systemAudio.rawValue }
+        guard !systemSegments.isEmpty else { return transcript }
 
-        guard !referenceSentences.isEmpty else {
-            return transcript
+        if systemSegments.contains(where: { $0.startTime != nil }) {
+            return deduplicateTimestamped(transcript, systemSegments: systemSegments, threshold: threshold)
         }
-
-        var deduplicatedSegments: [TranscriptSegment] = []
-
-        for segment in transcript.segments {
-            guard segment.speaker == AudioSource.microphone.rawValue else {
-                deduplicatedSegments.append(segment)
-                continue
-            }
-
-            let originalSentences = sentences(in: segment.text)
-            let keptSentences = originalSentences.filter { sentence in
-                let normalized = normalize(sentence)
-                if normalized.isEmpty {
-                    return false
-                }
-                return !referenceSentences.contains { reference in
-                    similarity(normalized, reference) >= threshold
-                }
-            }
-
-            let rejoined = keptSentences.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !rejoined.isEmpty else {
-                continue
-            }
-
-            deduplicatedSegments.append(
-                TranscriptSegment(speaker: segment.speaker, startTime: segment.startTime, text: rejoined)
-            )
-        }
-
-        return Transcript(segments: deduplicatedSegments)
+        return deduplicateTextOnly(transcript, systemSegments: systemSegments, threshold: threshold)
     }
 
     /// Collapses runs of consecutive identical sentences within each segment
     /// (e.g. a Whisper hallucination of "This is a test." repeated many times).
     /// Non-consecutive legitimate repeats are preserved.
+    ///
+    /// Also handles fine-grained WhisperKit output where each hallucinated phrase
+    /// arrives as a separate `TranscriptSegment`: consecutive segments from the
+    /// same speaker with identical text are collapsed to one.
     public static func collapseRepeatedSentences(_ transcript: Transcript) -> Transcript {
-        let collapsedSegments = transcript.segments.compactMap { segment -> TranscriptSegment? in
+        var result: [TranscriptSegment] = []
+
+        for segment in transcript.segments {
+            // Within-segment: collapse consecutive identical sentences
             let originalSentences = sentences(in: segment.text)
             guard !originalSentences.isEmpty else {
-                return segment
+                result.append(segment)
+                continue
             }
 
             var kept: [String] = []
@@ -74,14 +74,134 @@ public enum TranscriptDeduplicator {
             }
 
             let rejoined = kept.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !rejoined.isEmpty else {
-                return nil
+            guard !rejoined.isEmpty else { continue }
+
+            let collapsed = TranscriptSegment(speaker: segment.speaker, startTime: segment.startTime, text: rejoined)
+
+            // Cross-segment: drop if the immediately preceding output segment from
+            // the same speaker is identical (catches fine-grained hallucination runs).
+            if let prev = result.last,
+               prev.speaker == collapsed.speaker,
+               normalize(prev.text) == normalize(collapsed.text),
+               !normalize(collapsed.text).isEmpty {
+                continue
             }
-            return TranscriptSegment(speaker: segment.speaker, startTime: segment.startTime, text: rejoined)
+
+            result.append(collapsed)
         }
 
-        return Transcript(segments: collapsedSegments)
+        return Transcript(segments: result)
     }
+
+    // MARK: - Timestamp-aware path
+
+    private static func deduplicateTimestamped(
+        _ transcript: Transcript,
+        systemSegments: [TranscriptSegment],
+        threshold: Double
+    ) -> Transcript {
+        // When timestamp proximity corroborates an echo we accept a slightly lower
+        // text-similarity bar — the timing evidence compensates.
+        let timestampedThreshold = max(threshold - 0.15, 0.60)
+
+        // Pre-build text-only structures for any mic segments that lack a timestamp.
+        let referenceSentences = systemSegments
+            .flatMap { sentences(in: $0.text) }
+            .map { normalize($0) }
+            .filter { !$0.isEmpty }
+        let referenceBigrams = Set(bigrams(of: referenceSentences.joined(separator: " ")))
+
+        var result: [TranscriptSegment] = []
+
+        for segment in transcript.segments {
+            guard segment.speaker == AudioSource.microphone.rawValue else {
+                result.append(segment)
+                continue
+            }
+
+            let normalizedMic = normalize(segment.text)
+            guard !normalizedMic.isEmpty else { continue }
+
+            if let micTime = segment.startTime {
+                // Collect system-audio segments whose timing overlaps this mic segment.
+                let nearbySystemTexts = systemSegments.compactMap { sys -> String? in
+                    guard let sysTime = sys.startTime,
+                          abs(micTime - sysTime) <= echoWindow else { return nil }
+                    let n = normalize(sys.text)
+                    return n.isEmpty ? nil : n
+                }
+
+                if nearbySystemTexts.isEmpty {
+                    // No system-audio activity near this timestamp → genuine mic content.
+                    result.append(segment)
+                    continue
+                }
+
+                let isEcho = nearbySystemTexts.contains { similarity(normalizedMic, $0) >= timestampedThreshold }
+                if !isEcho { result.append(segment) }
+
+            } else {
+                // Mic segment has no timestamp (unusual in the timestamped path but
+                // possible for error segments): use text-only check as a safety net.
+                let matchesSentence = referenceSentences.contains { similarity(normalizedMic, $0) >= threshold }
+                let coversBigrams = bigramCoverage(of: normalizedMic, in: referenceBigrams) >= 0.60
+                if !matchesSentence && !coversBigrams { result.append(segment) }
+            }
+        }
+
+        return Transcript(segments: result)
+    }
+
+    // MARK: - Text-only path (API / no timestamps)
+
+    private static func deduplicateTextOnly(
+        _ transcript: Transcript,
+        systemSegments: [TranscriptSegment],
+        threshold: Double
+    ) -> Transcript {
+        let referenceSentences = systemSegments
+            .flatMap { sentences(in: $0.text) }
+            .map { normalize($0) }
+            .filter { !$0.isEmpty }
+
+        // Build a bigram set from the entire system audio text so we can catch
+        // speaker bleed that spans multiple system-audio sentence boundaries.
+        // The per-sentence similarity check misses cases where Whisper merged
+        // two consecutive system-audio sentences into one long mic sentence.
+        let fullReferenceText = referenceSentences.joined(separator: " ")
+        let referenceBigrams = Set(bigrams(of: fullReferenceText))
+
+        var result: [TranscriptSegment] = []
+
+        for segment in transcript.segments {
+            guard segment.speaker == AudioSource.microphone.rawValue else {
+                result.append(segment)
+                continue
+            }
+
+            let originalSentences = sentences(in: segment.text)
+            let keptSentences = originalSentences.filter { sentence in
+                let normalized = normalize(sentence)
+                if normalized.isEmpty { return false }
+                let matchesSentence = referenceSentences.contains { similarity(normalized, $0) >= threshold }
+                if matchesSentence { return false }
+
+                // Secondary check: if most of this sentence's bigrams appear
+                // anywhere in the system audio, it is speaker bleed even if no
+                // single reference sentence matched it closely enough.
+                return bigramCoverage(of: normalized, in: referenceBigrams) < 0.60
+            }
+
+            let rejoined = keptSentences.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !rejoined.isEmpty else { continue }
+
+            result.append(TranscriptSegment(speaker: segment.speaker, startTime: segment.startTime, text: rejoined))
+        }
+
+        return Transcript(segments: result)
+    }
+
+    // MARK: - Text helpers
 
     static func sentences(in text: String) -> [String] {
         var results: [String] = []
@@ -126,26 +246,45 @@ public enum TranscriptDeduplicator {
     }
 
     static func similarity(_ lhs: String, _ rhs: String) -> Double {
-        if lhs == rhs {
-            return 1
+        if lhs == rhs { return 1 }
+
+        // Word-overlap (Jaccard) check: handles cases where speaker bleed adds
+        // a short prefix/suffix word that inflates Levenshtein distance.
+        let lhsWords = Set(lhs.split(separator: " ").map(String.init))
+        let rhsWords = Set(rhs.split(separator: " ").map(String.init))
+        let unionCount = lhsWords.union(rhsWords).count
+        if unionCount > 0 {
+            let jaccardSimilarity = Double(lhsWords.intersection(rhsWords).count) / Double(unionCount)
+            if jaccardSimilarity >= defaultThreshold { return jaccardSimilarity }
         }
 
         let lhsChars = Array(lhs)
         let rhsChars = Array(rhs)
         let maxLength = max(lhsChars.count, rhsChars.count)
-        guard maxLength > 0 else {
-            return 1
-        }
+        guard maxLength > 0 else { return 1 }
 
-        // Length pre-filter: if lengths differ too much, similarity cannot
-        // reach a high threshold, so skip the expensive edit-distance work.
+        // Length pre-filter: skip Levenshtein if lengths differ by more than 30%.
         let minLength = min(lhsChars.count, rhsChars.count)
-        if Double(maxLength - minLength) / Double(maxLength) > 0.05 {
-            return 0
-        }
+        if Double(maxLength - minLength) / Double(maxLength) > 0.30 { return 0 }
 
         let distance = levenshtein(lhsChars, rhsChars)
         return 1 - Double(distance) / Double(maxLength)
+    }
+
+    /// Returns consecutive word pairs from a normalized string.
+    static func bigrams(of text: String) -> [String] {
+        let words = text.split(separator: " ").map(String.init)
+        guard words.count >= 2 else { return [] }
+        return (0..<words.count - 1).map { "\(words[$0]) \(words[$0 + 1])" }
+    }
+
+    /// Fraction of `sentence`'s bigrams that appear in `referenceBigrams`.
+    /// Returns 0 when the sentence has fewer than 2 words.
+    static func bigramCoverage(of sentence: String, in referenceBigrams: Set<String>) -> Double {
+        let sentenceBigrams = bigrams(of: sentence)
+        guard !sentenceBigrams.isEmpty else { return 0 }
+        let covered = sentenceBigrams.filter { referenceBigrams.contains($0) }.count
+        return Double(covered) / Double(sentenceBigrams.count)
     }
 
     private static func levenshtein(_ lhs: [Character], _ rhs: [Character]) -> Int {

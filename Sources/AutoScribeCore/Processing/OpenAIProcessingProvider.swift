@@ -18,7 +18,11 @@ public final class OpenAIProcessingProvider: ProcessingProvider, @unchecked Send
         self.summaryModel = summaryModel
     }
 
-    public func process(capture: AudioCaptureResult, settings: AppSettings) async throws -> ProcessingResult {
+    public func process(
+        capture: AudioCaptureResult,
+        settings: AppSettings,
+        onTranscriptReady: (@Sendable (Transcript) async -> Void)? = nil
+    ) async throws -> ProcessingResult {
         guard settings.processingMode == .api else {
             throw ProcessingProviderError.unsupportedLocalMode
         }
@@ -30,8 +34,57 @@ public final class OpenAIProcessingProvider: ProcessingProvider, @unchecked Send
         let transcript = try await transcribe(capture: capture, apiKey: apiKey)
         let deduplicated = TranscriptDeduplicator.deduplicate(transcript)
         let cleaned = TranscriptDeduplicator.collapseRepeatedSentences(deduplicated)
+
+        // Notify the controller that the transcript is ready before summarization.
+        await onTranscriptReady?(cleaned)
+
         let summary = try await summarize(transcript: cleaned, depth: settings.summaryDepth, apiKey: apiKey)
         return ProcessingResult(transcript: cleaned, summary: summary)
+    }
+
+    /// Generates a short title (4–6 words) for use in filenames via a minimal API call.
+    /// Never throws — returns "recording" on failure.
+    public func generateTitle(transcript: Transcript, apiKey: String) async -> String {
+        var request = URLRequest(url: URL(string: "https://api.openai.com/v1/responses")!)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let payload: [String: Any] = [
+            "model": summaryModel,
+            "input": """
+            Reply with only a title of 4-6 words for this conversation. \
+            Use plain words, no punctuation, no quotes.
+
+            Transcript:
+            \(transcript.textForSummarization.prefix(400))
+            """,
+            "max_output_tokens": 40
+        ]
+
+        guard let body = try? JSONSerialization.data(withJSONObject: payload) else { return "recording" }
+        request.httpBody = body
+
+        do {
+            let (data, _) = try await session.data(for: request)
+            guard let text = try? ResponsesAPITextExtractor.extractText(from: data) else { return "recording" }
+            return sanitizeTitle(text)
+        } catch {
+            return "recording"
+        }
+    }
+
+    private func sanitizeTitle(_ raw: String) -> String {
+        let stripped = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\"", with: "")
+            .replacingOccurrences(of: "'", with: "")
+            .replacingOccurrences(of: ".", with: "")
+            .replacingOccurrences(of: ",", with: "")
+            .replacingOccurrences(of: ":", with: "")
+        let firstLine = stripped.components(separatedBy: "\n").first ?? stripped
+        let words = firstLine.split(separator: " ").prefix(6).joined(separator: " ")
+        return words.isEmpty ? "recording" : words
     }
 
     private func transcribe(capture: AudioCaptureResult, apiKey: String) async throws -> Transcript {
@@ -42,10 +95,9 @@ public final class OpenAIProcessingProvider: ProcessingProvider, @unchecked Send
                 continue
             }
 
-            guard let uploadURL = try? AudioLevelAnalyzer.trimmedSilence(url: file.url) else {
-                // No signal above the silence threshold: skip to avoid hallucinated filler.
-                continue
-            }
+            // Fall back to the original file when no active frames are found above
+            // threshold — skipping outright was too aggressive for quiet mics.
+            let uploadURL = (try? AudioLevelAnalyzer.trimmedSilence(url: file.url)) ?? file.url
             defer {
                 if uploadURL != file.url {
                     try? FileManager.default.removeItem(at: uploadURL)
@@ -100,9 +152,10 @@ public final class OpenAIProcessingProvider: ProcessingProvider, @unchecked Send
             input: """
             Create a \(depth.rawValue) meeting summary from this transcript.
             Return only JSON matching the requested schema. Do not wrap the JSON in markdown.
+            Write each keyPoint as a concise insight in your own words — do not copy transcript sentences verbatim.
 
             Transcript:
-            \(transcript.plainText)
+            \(transcript.textForSummarization)
             """,
             text: SummaryTextOptions(
                 format: SummaryJSONSchema(

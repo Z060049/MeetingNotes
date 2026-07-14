@@ -143,6 +143,89 @@ public final class LocalSummarizationService: ObservableObject, @unchecked Senda
         mlxDownloadState == .ready
     }
 
+    // MARK: - Title generation
+
+    /// Generates a short title (4–6 words) for use in filenames.
+    /// Uses the same active tier but with a strict 40-token cap so it returns fast.
+    /// Never throws — returns "recording" on any failure.
+    public func generateTitle(transcript: Transcript, mlxModelID: String) async -> String {
+        let prompt = """
+        Reply with only a title of 4-6 words for this conversation. \
+        Use plain words, no punctuation, no quotes.
+
+        Transcript:
+        \(transcript.textForSummarization.prefix(400))
+        """
+
+        do {
+            switch tier {
+            case .appleIntelligence:
+                return try await generateTitleWithAppleIntelligence(prompt: prompt)
+            case .mlx:
+                return try await generateTitleWithMLX(prompt: prompt, modelID: mlxModelID)
+            case .unavailable:
+                return "recording"
+            }
+        } catch {
+            return "recording"
+        }
+    }
+
+    private func generateTitleWithAppleIntelligence(prompt: String) async throws -> String {
+        #if canImport(FoundationModels)
+        if #available(macOS 26.0, *) {
+            let session = LanguageModelSession()
+            let response = try await session.respond(to: prompt)
+            return sanitizeTitle(response.content)
+        }
+        #endif
+        return "recording"
+    }
+
+    private func generateTitleWithMLX(prompt: String, modelID: String) async throws -> String {
+        #if arch(arm64)
+        if mlxContainer == nil || loadedMLXModelID != modelID {
+            guard downloadedMLXModels.contains(modelID) else { return "recording" }
+            await setMLXState(.loading)
+            do {
+                let config = ModelConfiguration(id: modelID)
+                let container = try await LLMModelFactory.shared.loadContainer(
+                    from: #hubDownloader(),
+                    using: #huggingFaceTokenizerLoader(),
+                    configuration: config
+                ) { _ in }
+                mlxContainer = container
+                loadedMLXModelID = modelID
+                await setMLXState(.ready)
+            } catch {
+                return "recording"
+            }
+        }
+
+        guard let container = mlxContainer else { return "recording" }
+        let params = GenerateParameters(maxTokens: 40, temperature: 0)
+        let session = ChatSession(container, generateParameters: params)
+        let output = try await session.respond(to: prompt)
+        return sanitizeTitle(output)
+        #else
+        return "recording"
+        #endif
+    }
+
+    private func sanitizeTitle(_ raw: String) -> String {
+        let stripped = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\"", with: "")
+            .replacingOccurrences(of: "'", with: "")
+            .replacingOccurrences(of: ".", with: "")
+            .replacingOccurrences(of: ",", with: "")
+            .replacingOccurrences(of: ":", with: "")
+        // Keep only the first line in case the model emits extra text
+        let firstLine = stripped.components(separatedBy: "\n").first ?? stripped
+        let words = firstLine.split(separator: " ").prefix(6).joined(separator: " ")
+        return words.isEmpty ? "recording" : words
+    }
+
     // MARK: - Summarization
 
     /// Summarises a transcript using whichever tier is active on this device.
@@ -175,7 +258,7 @@ public final class LocalSummarizationService: ObservableObject, @unchecked Senda
             let prompt = buildPrompt(transcript: transcript, depth: depth)
             do {
                 let response = try await session.respond(to: prompt)
-                return try parseSummaryFromText(response.content)
+                return parsePlainTextSummary(response.content, fallbackTitle: "Meeting")
             } catch {
                 throw ProcessingProviderError.localProcessingError(
                     "Apple Intelligence summarization failed: \(error.localizedDescription)"
@@ -243,7 +326,7 @@ public final class LocalSummarizationService: ObservableObject, @unchecked Senda
                 generateParameters: generationParameters
             )
             let output = try await session.respond(to: prompt)
-            return try parseSummaryFromText(output)
+            return parsePlainTextSummary(output, fallbackTitle: "Meeting")
         } catch {
             throw ProcessingProviderError.localProcessingError(
                 "MLX summarization failed: \(error.localizedDescription)"
@@ -258,75 +341,108 @@ public final class LocalSummarizationService: ObservableObject, @unchecked Senda
 
     private func maximumOutputTokens(for depth: SummaryDepth) -> Int {
         switch depth {
-        case .brief: 384
-        case .standard: 640
-        case .detailed: 1_024
+        case .brief: 768
+        case .standard: 1_536
+        case .detailed: 2_560
         }
     }
 
     // MARK: - Prompt building
 
     private func buildPrompt(transcript: Transcript, depth: SummaryDepth) -> String {
-        let depthInstruction: String
+        let bulletLimit: String
         switch depth {
-        case .brief:    depthInstruction = "Keep each list to 2-3 items maximum."
-        case .standard: depthInstruction = "Keep each list to 4-6 items."
-        case .detailed: depthInstruction = "Be thorough; include all significant details."
+        case .brief:    bulletLimit = "Write at most 3 bullets under KEY POINTS."
+        case .standard: bulletLimit = "Write at most 5 bullets under KEY POINTS."
+        case .detailed: bulletLimit = "Write at most 8 bullets under KEY POINTS."
         }
 
         return """
-        You are a meeting notes assistant. Create a \(depth.rawValue) meeting summary from the following transcript.
+        You are a meeting notes assistant. Summarize the transcript using the exact section headers below.
+        Write one short bullet per line starting with "- ". Use "- none" if a section has nothing to report.
+        Stop after FOLLOW UPS. Do not add any other text.
+        \(bulletLimit)
 
-        Rules:
-        - Return ONLY valid JSON — no markdown fences, no explanation, no preamble.
-        - \(depthInstruction)
-        - If a section has nothing to report, use an empty array [].
-
-        Required JSON format:
-        {
-          "title": "Brief descriptive meeting title",
-          "keyPoints": ["point 1", "point 2"],
-          "decisions": ["decision 1"],
-          "actionItems": ["action item 1"],
-          "followUps": ["follow-up question 1"]
-        }
+        TITLE: <4-6 word title>
+        KEY POINTS:
+        - <key point>
+        DECISIONS:
+        - <decision or none>
+        ACTION ITEMS:
+        - <action item or none>
+        FOLLOW UPS:
+        - <follow-up question or none>
 
         Transcript:
-        \(transcript.plainText)
+        \(transcript.textForSummarization)
+
+        TITLE:
         """
     }
 
-    // MARK: - JSON parsing
+    // MARK: - Plain-text section parsing
 
-    private func parseSummaryFromText(_ text: String) throws -> MeetingSummary {
-        var cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if cleaned.hasPrefix("```") {
-            cleaned = cleaned
-                .replacingOccurrences(of: "```json", with: "")
-                .replacingOccurrences(of: "```JSON", with: "")
-                .replacingOccurrences(of: "```", with: "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+    /// Parses the model's plain-text section output into a `MeetingSummary`.
+    /// Never throws — always returns something usable regardless of model output quality.
+    private func parsePlainTextSummary(_ text: String, fallbackTitle: String) -> MeetingSummary {
+        let lines = text.components(separatedBy: "\n")
+
+        var title = ""
+        var keyPoints: [String] = []
+        var decisions: [String] = []
+        var actionItems: [String] = []
+        var followUps: [String] = []
+
+        enum Section { case title, keyPoints, decisions, actionItems, followUps, none }
+        var currentSection: Section = .title
+
+        for raw in lines {
+            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty else { continue }
+
+            // Section header detection
+            let upper = line.uppercased()
+            if upper.hasPrefix("TITLE:") {
+                currentSection = .title
+                let value = line.dropFirst("TITLE:".count).trimmingCharacters(in: .whitespaces)
+                if !value.isEmpty && !value.hasPrefix("<") { title = value }
+                continue
+            }
+            if upper.hasPrefix("KEY POINTS") { currentSection = .keyPoints; continue }
+            if upper.hasPrefix("DECISIONS")  { currentSection = .decisions;  continue }
+            if upper.hasPrefix("ACTION ITEMS") { currentSection = .actionItems; continue }
+            if upper.hasPrefix("FOLLOW UPS") || upper.hasPrefix("FOLLOW-UPS") {
+                currentSection = .followUps; continue
+            }
+
+            // Bullet lines
+            if line.hasPrefix("- ") || line.hasPrefix("• ") {
+                let content = String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+                // Skip placeholder or "none" entries
+                let lower = content.lowercased()
+                if lower == "none" || lower.hasPrefix("<") || content.isEmpty { continue }
+
+                switch currentSection {
+                case .keyPoints:   keyPoints.append(content)
+                case .decisions:   decisions.append(content)
+                case .actionItems: actionItems.append(content)
+                case .followUps:   followUps.append(content)
+                case .title, .none: break
+                }
+            } else if currentSection == .title && title.isEmpty && !line.hasPrefix("<") {
+                // Handles models that omit the "TITLE:" label and just write the title
+                title = line
+            }
         }
 
-        // Extract first JSON object if the model added preamble
-        if let start = cleaned.firstIndex(of: "{"),
-           let end = cleaned.lastIndex(of: "}") {
-            cleaned = String(cleaned[start...end])
-        }
-
-        guard let data = cleaned.data(using: .utf8) else {
-            throw ProcessingProviderError.localProcessingError(
-                "Local model returned non-UTF-8 text."
-            )
-        }
-
-        do {
-            return try JSONDecoder().decode(MeetingSummary.self, from: data)
-        } catch {
-            throw ProcessingProviderError.localProcessingError(
-                "Local model did not return valid meeting-summary JSON: \(error.localizedDescription)\n\nRaw output: \(cleaned.prefix(500))"
-            )
-        }
+        let resolvedTitle = title.isEmpty ? fallbackTitle : title
+        return MeetingSummary(
+            title: resolvedTitle,
+            keyPoints: keyPoints,
+            decisions: decisions,
+            actionItems: actionItems,
+            followUps: followUps
+        )
     }
 
     // MARK: - Private helpers

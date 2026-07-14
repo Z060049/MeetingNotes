@@ -17,6 +17,55 @@ public final class MarkdownExporter: @unchecked Sendable {
         self.calendar = calendar
     }
 
+    // MARK: - Raw transcript export
+
+    /// Writes the raw transcript file immediately after Whisper finishes,
+    /// before the LLM summarization step. This acts as a safe fallback —
+    /// if summarization crashes, the transcript is already on disk.
+    @discardableResult
+    public func exportRawTranscription(
+        transcript: Transcript,
+        shortTitle: String,
+        session: RecordingSession,
+        to directory: URL
+    ) throws -> URL {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let document = renderRawTranscription(transcript: transcript, shortTitle: shortTitle, session: session)
+        let outputURL = directory.appendingPathComponent(document.filename)
+        try document.contents.write(to: outputURL, atomically: true, encoding: .utf8)
+        return outputURL
+    }
+
+    public func renderRawTranscription(
+        transcript: Transcript,
+        shortTitle: String,
+        session: RecordingSession
+    ) -> MarkdownDocument {
+        let sanitized = sanitizedTitle(shortTitle)
+        let filename = "\(Self.filenameDateFormatter.string(from: session.startedAt))_\(sanitized)_transcript.md"
+        let sources = session.audioSources.map(\.rawValue).sorted().joined(separator: ", ")
+
+        let contents = """
+        ---
+        title: \(shortTitle)
+        date: \(Self.metadataDateFormatter.string(from: session.startedAt))
+        duration: \(Self.durationFormatter.string(from: session.duration) ?? "Unknown")
+        processing_mode: \(session.processingMode.rawValue)
+        audio_sources: \(sources)
+        ---
+
+        # \(shortTitle) (Raw Transcript)
+
+        ## Transcript
+
+        \(Self.transcriptBySource(transcript, session: session))
+        """
+
+        return MarkdownDocument(filename: filename, contents: contents)
+    }
+
+    // MARK: - Summary export
+
     public func export(
         result: ProcessingResult,
         session: RecordingSession,
@@ -29,9 +78,37 @@ public final class MarkdownExporter: @unchecked Sendable {
         return outputURL
     }
 
+    /// Exports the full summary, using `shortTitle` for the filename so it matches
+    /// the raw transcript file written earlier in the pipeline.
+    @discardableResult
+    public func exportSummary(
+        result: ProcessingResult,
+        shortTitle: String,
+        session: RecordingSession,
+        to directory: URL
+    ) throws -> URL {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let document = render(result: result, shortTitle: shortTitle, session: session)
+        let outputURL = directory.appendingPathComponent(document.filename)
+        try document.contents.write(to: outputURL, atomically: true, encoding: .utf8)
+        return outputURL
+    }
+
+    /// Renders the summary document using `shortTitle` for the filename.
+    /// The full `result.summary.title` is still used for the document's H1 heading.
+    public func render(result: ProcessingResult, shortTitle: String, session: RecordingSession) -> MarkdownDocument {
+        let sanitized = sanitizedTitle(shortTitle)
+        let filename = "\(Self.filenameDateFormatter.string(from: session.startedAt))_\(sanitized).md"
+        return renderContents(result: result, filename: filename, session: session)
+    }
+
     public func render(result: ProcessingResult, session: RecordingSession) -> MarkdownDocument {
         let title = sanitizedTitle(result.summary.title)
         let filename = "\(Self.filenameDateFormatter.string(from: session.startedAt))_\(title).md"
+        return renderContents(result: result, filename: filename, session: session)
+    }
+
+    private func renderContents(result: ProcessingResult, filename: String, session: RecordingSession) -> MarkdownDocument {
         let sources = session.audioSources.map(\.rawValue).sorted().joined(separator: ", ")
 
         let contents = """

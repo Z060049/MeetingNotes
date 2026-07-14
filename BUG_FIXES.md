@@ -49,6 +49,52 @@ AutoScribe now enforces summary output limits:
 
 These limits apply only to the generated summary. The full audio transcription is still processed separately.
 
+## Microphone transcript retains speaker-bleed duplicates
+
+### Symptoms
+
+- In a Zoom/speaker test, the microphone transcript contained the same sentence already captured in the System Audio stream.
+- The summary listed both the Microphone and System Audio versions of identical speech (e.g. "Okay, this is a testing for AutoScribe…" appeared twice).
+
+### Cause
+
+`TranscriptDeduplicator` compared sentences individually using Levenshtein similarity with a 0.95 threshold and a strict 5% length pre-filter. Speaker bleed introduces small differences between the two streams:
+
+1. Whisper splits the system-audio text differently — a short prefix word (e.g. "Okay.") becomes its own sentence, so the remaining sentence starts one word later than the microphone version.
+2. Punctuation and minor word-boundary differences (e.g. "auto-scribe" → "auto scribe" vs "autoscribe") push character-level similarity just below 0.95 (~0.94), causing the sentence to slip through.
+3. The 5% length pre-filter returned 0 before Levenshtein even ran when the prefix word produced a ~5–10% length gap.
+
+### Fix
+
+Three changes to `TranscriptDeduplicator.swift`:
+
+- **Threshold lowered 0.95 → 0.82.** Real-world speaker bleed reduces Levenshtein similarity to ~0.93–0.94 due to short prefix words and minor transcription differences. 0.82 catches these while leaving genuinely unique mic content untouched.
+- **Length pre-filter relaxed 5% → 30%.** The 5% cap was too strict — a single extra prefix word inflates the length difference to ~8–10%, causing the filter to short-circuit and return 0 before comparison.
+- **Jaccard word-overlap added as a second signal.** If two sentences share ≥82% of their unique words, the sentence is treated as a duplicate regardless of character-level differences. This cleanly handles cases like "auto scribe" vs "autoscribe" that confuse Levenshtein.
+
+## Summary section contains raw transcript lines instead of insights
+
+### Symptoms
+
+- The `## Summary` section in the output Markdown listed raw speaker-labelled lines like `"Microphone: Okay, this is a testing for auto-scribe…"` instead of synthesized bullet points.
+- A hallucinated word ("University") from Whisper appeared as a fake speaker label in the summary.
+- The `>>` WhisperKit artifact appeared verbatim in the summary output.
+- Some summary lines were duplicated.
+
+### Cause
+
+Three issues combined:
+
+1. **Speaker labels in the LLM input.** `plainText` fed `"Microphone: …"` and `"System Audio: …"` prefixes directly to the model. Qwen 0.5B (the default local model) is too small to abstract over these labels, so it copied the transcript lines verbatim into `keyPoints` rather than summarizing.
+2. **WhisperKit `>>` artifact.** WhisperKit sometimes prepends `>>` to system audio output; this appeared raw in the LLM input and propagated into the summary.
+3. **Whisper hallucination treated as a speaker.** Whisper misheard a word mid-sentence and inserted `"University,"`. With speaker labels present in the input, the model treated `"University:"` as a third participant and duplicated the following line.
+
+### Fix
+
+- Added `textForSummarization` to `Transcript` (`TranscriptModels.swift`). It merges all segments into clean prose, stripping speaker labels, `>>` prefixes, and `[silence]` filler tokens before the text is sent to any LLM.
+- Updated `buildPrompt` in `LocalSummarizationService.swift` to use `textForSummarization` and added an explicit rule: *"Write each keyPoint as a concise insight in your own words — do not copy transcript sentences verbatim."*
+- Updated `OpenAIProcessingProvider.swift` to use `textForSummarization` for consistency.
+
 ## Verification
 
 - Confirmed that audio remained available in Recording Recovery after terminating the stuck process.

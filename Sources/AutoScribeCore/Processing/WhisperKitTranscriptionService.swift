@@ -181,7 +181,12 @@ public final class WhisperKitTranscriptionService: ObservableObject, @unchecked 
 
         for file in files {
             guard AudioTranscriptionPolicy.decision(for: file).shouldTranscribe else { continue }
-            guard let uploadURL = try? AudioLevelAnalyzer.trimmedSilence(url: file.url) else { continue }
+            // Use the silence-trimmed URL when available; fall back to the original
+            // file when trimmedSilence finds no active frames above threshold.
+            // Skipping outright was too aggressive for quiet mics — Whisper will
+            // simply return nothing for truly silent audio, and the filler-token
+            // filter below handles any hallucinated output.
+            let uploadURL = (try? AudioLevelAnalyzer.trimmedSilence(url: file.url)) ?? file.url
             defer {
                 if uploadURL != file.url {
                     try? FileManager.default.removeItem(at: uploadURL)
@@ -194,13 +199,35 @@ public final class WhisperKitTranscriptionService: ObservableObject, @unchecked 
                     audioPath: uploadURL.path,
                     decodeOptions: options
                 )
-                let text = results
-                    .map(\.text)
-                    .joined(separator: " ")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
 
-                if !text.isEmpty {
-                    segments.append(TranscriptSegment(speaker: file.source.rawValue, text: text))
+                // Emit one TranscriptSegment per WhisperKit sub-segment so that
+                // each segment carries a real start-time offset.  This enables
+                // timestamp-aware echo deduplication in TranscriptDeduplicator.
+                var addedAny = false
+                for result in results {
+                    for seg in result.segments {
+                        let segText = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !segText.isEmpty, !Self.isWhisperFillerToken(segText) else { continue }
+                        segments.append(TranscriptSegment(
+                            speaker: file.source.rawValue,
+                            startTime: TimeInterval(seg.start),
+                            text: segText
+                        ))
+                        addedAny = true
+                    }
+                }
+
+                // Fallback: if this WhisperKit build doesn't populate segments but
+                // does set result.text, use that without a timestamp so the
+                // text-only deduplication path still works.
+                if !addedAny {
+                    let fallbackText = results
+                        .map(\.text)
+                        .joined(separator: " ")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !fallbackText.isEmpty, !Self.isWhisperFillerToken(fallbackText) {
+                        segments.append(TranscriptSegment(speaker: file.source.rawValue, text: fallbackText))
+                    }
                 }
             } catch {
                 // Log and continue — a failed file should not abort the whole session.
@@ -215,6 +242,15 @@ public final class WhisperKitTranscriptionService: ObservableObject, @unchecked 
     }
 
     // MARK: - Private
+
+    /// Returns true for Whisper tokens that signal silence or non-speech events
+    /// rather than real transcript content (e.g. `[BLANK_AUDIO]`, `[silence]`).
+    private static func isWhisperFillerToken(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        return lower == "[blank_audio]"
+            || lower == "[silence]"
+            || lower.hasPrefix("[ silence")
+    }
 
     @MainActor
     private func setDownloadState(_ state: ModelDownloadState) {

@@ -1,7 +1,17 @@
 import Foundation
 
 public protocol ProcessingProvider: Sendable {
-    func process(capture: AudioCaptureResult, settings: AppSettings) async throws -> ProcessingResult
+    /// Process a captured recording into a `ProcessingResult`.
+    ///
+    /// - Parameter onTranscriptReady: Called after transcription and deduplication
+    ///   but before summarization. Use this hook to write the raw transcript file
+    ///   while summarization proceeds. The closure is always called on an
+    ///   arbitrary async context and must be safe to call from any thread.
+    func process(
+        capture: AudioCaptureResult,
+        settings: AppSettings,
+        onTranscriptReady: (@Sendable (Transcript) async -> Void)?
+    ) async throws -> ProcessingResult
 }
 
 public enum ProcessingProviderError: Error, LocalizedError {

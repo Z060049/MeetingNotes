@@ -29,6 +29,26 @@ public struct Transcript: Codable, Equatable, Sendable {
         .joined(separator: "\n")
     }
 
+    /// A cleaned, label-free version of the transcript for use in LLM prompts.
+    ///
+    /// Removes speaker labels and WhisperKit artifacts (e.g. `>>`) that
+    /// confuse small models into copying the transcript instead of summarizing.
+    public var textForSummarization: String {
+        let whisperArtifacts = [">> ", ">>"]
+        return segments
+            .map { segment in
+                var text = segment.text
+                for artifact in whisperArtifacts {
+                    text = text.replacingOccurrences(of: artifact, with: "")
+                }
+                // Strip "[silence]" and similar Whisper filler tokens
+                text = text.replacingOccurrences(of: "[silence]", with: "", options: .caseInsensitive)
+                return text.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
     private static func timestamp(_ interval: TimeInterval) -> String {
         let minutes = Int(interval) / 60
         let seconds = Int(interval) % 60

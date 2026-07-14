@@ -17,6 +17,7 @@ public final class AutoScribeController: ObservableObject {
     @Published public private(set) var lastError: String?
     @Published public private(set) var diagnostics: [DiagnosticEvent] = []
     @Published public private(set) var latestOutputURL: URL?
+    @Published public private(set) var latestRawTranscriptURL: URL?
 
     /// Manages on-device Whisper and LLM models. Observe this in Settings for
     /// download state and actions.
@@ -201,20 +202,119 @@ public final class AutoScribeController: ObservableObject {
         addDiagnostic("Processing mode: \(settings.processingMode.rawValue).")
         logTranscriptionDecisions(for: capture.files)
 
+        // Capture values needed inside the Sendable closure.
+        let outputDirectory = settings.outputDirectory
+        let currentSettings = settings
+        let session = capture.session
+
+        // shortTitle is set inside onTranscriptReady and read after process() returns.
+        // We use an actor-isolated box so the closure can write it safely.
+        let titleBox = TitleBox()
+
+        let onTranscriptReady: @Sendable (Transcript) async -> Void = { [weak self] transcript in
+            guard let self else { return }
+
+            // 1. Generate a short title (~4–6 words, 40 token cap).
+            let shortTitle: String
+            switch currentSettings.processingMode {
+            case .local:
+                shortTitle = await self.localModelManager.summarizationService.generateTitle(
+                    transcript: transcript,
+                    mlxModelID: currentSettings.localLLMModel
+                )
+            case .api:
+                if let apiKey = EnvironmentConfiguration.openAIAPIKey(), !apiKey.isEmpty {
+                    let provider = OpenAIProcessingProvider { apiKey }
+                    shortTitle = await provider.generateTitle(transcript: transcript, apiKey: apiKey)
+                } else {
+                    shortTitle = "recording"
+                }
+            }
+
+            await titleBox.set(shortTitle)
+
+            // 2. Write the raw transcript file immediately as a safe fallback.
+            do {
+                let rawURL = try self.markdownExporter.exportRawTranscription(
+                    transcript: transcript,
+                    shortTitle: shortTitle,
+                    session: session,
+                    to: outputDirectory
+                )
+                await MainActor.run { [weak self] in
+                    self?.latestRawTranscriptURL = rawURL
+                    self?.addDiagnostic("Raw transcript saved to \(rawURL.path)")
+                }
+            } catch {
+                await MainActor.run { [weak self] in
+                    self?.addDiagnostic(
+                        "Could not write raw transcript: \(error.localizedDescription)",
+                        level: .warning
+                    )
+                }
+            }
+        }
+
         do {
-            let result = try await processingProvider.process(capture: capture, settings: settings)
-            addDiagnostic("Processing complete. Exporting Markdown.")
-            let outputURL = try markdownExporter.export(
-                result: result,
-                session: capture.session,
-                to: settings.outputDirectory
-            )
+            // Run transcription (and the onTranscriptReady callback which writes
+            // the raw transcript file). Summarization errors are caught separately
+            // below so the summary file is always written.
+            let result: ProcessingResult
+            do {
+                result = try await processingProvider.process(
+                    capture: capture,
+                    settings: settings,
+                    onTranscriptReady: onTranscriptReady
+                )
+                addDiagnostic("Processing complete. Exporting summary Markdown.")
+            } catch {
+                // Summarization or model-load failed. If we have a raw transcript
+                // on disk (written by onTranscriptReady), produce a minimal summary
+                // file so the user always gets both files.
+                let shortTitle = await titleBox.value ?? "recording"
+                let base = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                addDiagnostic("Summarization failed (\(base)). Writing minimal summary file.", level: .warning)
+
+                // Build a fallback ProcessingResult using an empty transcript if
+                // we never got one (e.g. Whisper itself failed — very rare).
+                let emptyTranscript = Transcript(segments: [])
+                let fallbackSummary = MeetingSummary(
+                    title: shortTitle,
+                    keyPoints: [],
+                    decisions: [],
+                    actionItems: [],
+                    followUps: []
+                )
+                result = ProcessingResult(transcript: emptyTranscript, summary: fallbackSummary)
+            }
+
+            // Use the same shortTitle generated during onTranscriptReady so both
+            // files share the same filename prefix.
+            let shortTitle = await titleBox.value
+            let outputURL: URL
+            if let shortTitle {
+                outputURL = try markdownExporter.exportSummary(
+                    result: result,
+                    shortTitle: shortTitle,
+                    session: capture.session,
+                    to: settings.outputDirectory
+                )
+            } else {
+                outputURL = try markdownExporter.export(
+                    result: result,
+                    session: capture.session,
+                    to: settings.outputDirectory
+                )
+            }
+
             cleanupTemporaryFiles(for: capture.session)
             latestOutputURL = outputURL
             setState(.complete(outputURL))
-            addDiagnostic("Markdown saved to \(outputURL.path)")
+            addDiagnostic("Summary saved to \(outputURL.path)")
             addDiagnostic("Validation output: duration \(Self.durationDescription(capture.session.duration)), path \(outputURL.path)")
         } catch {
+            // Only reaches here if transcription itself failed (Whisper error,
+            // no speech detected, etc.) — summarization errors are handled above.
             let savedURL = preserveUnprocessedAudio(capture)
             cleanupTemporaryFiles(for: capture.session)
             inactivityMonitor?.stop()
@@ -230,6 +330,13 @@ public final class AutoScribeController: ObservableObject {
             addDiagnostic(message, level: .error)
             processingFailed.send(ProcessingFailure(message: message, savedAudioURL: savedURL))
         }
+    }
+
+    /// A simple actor-isolated box for passing the generated title out of
+    /// the `onTranscriptReady` closure back into the enclosing `process()` scope.
+    private actor TitleBox {
+        private(set) var value: String?
+        func set(_ v: String) { value = v }
     }
 
     private func preserveUnprocessedAudio(_ capture: AudioCaptureResult) -> URL? {
