@@ -4,8 +4,17 @@ import SwiftUI
 
 struct MenuBarRootView: View {
     @ObservedObject var controller: AutoScribeController
+    private let onPreferredSizeChange: () -> Void
     @State private var showingSettings = false
     @State private var showingDiagnostics = false
+
+    init(
+        controller: AutoScribeController,
+        onPreferredSizeChange: @escaping () -> Void = {}
+    ) {
+        _controller = ObservedObject(wrappedValue: controller)
+        self.onPreferredSizeChange = onPreferredSizeChange
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -15,6 +24,13 @@ struct MenuBarRootView: View {
                 ConsentChecklistView(controller: controller)
             } else {
                 controls
+            }
+
+            if let routeMessage = controller.routeTransitionMessage {
+                Label(routeMessage, systemImage: "wave.3.right")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             if let error = controller.lastError {
@@ -44,6 +60,9 @@ struct MenuBarRootView: View {
         .fixedSize(horizontal: false, vertical: true)
         .sheet(isPresented: $showingSettings) {
             SettingsView(controller: controller)
+        }
+        .onChange(of: showingDiagnostics) {
+            onPreferredSizeChange()
         }
     }
 

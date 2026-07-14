@@ -18,6 +18,7 @@ public final class AutoScribeController: ObservableObject {
     @Published public private(set) var diagnostics: [DiagnosticEvent] = []
     @Published public private(set) var latestOutputURL: URL?
     @Published public private(set) var latestRawTranscriptURL: URL?
+    @Published public private(set) var routeTransitionMessage: String?
 
     /// Manages on-device Whisper and LLM models. Observe this in Settings for
     /// download state and actions.
@@ -54,11 +55,35 @@ public final class AutoScribeController: ObservableObject {
             for: loadedSettings,
             localModelManager: manager
         )
+        audioCaptureService.onRouteTransition = { [weak self] status in
+            Task { @MainActor in
+                self?.handleRouteTransition(status)
+            }
+        }
         Task { @MainActor in
             self.addDiagnostic("Controller initialized. Output folder: \(self.settings.outputDirectory.path)")
             self.reportRecoverableRecordings()
         }
         manager.checkDownloadStatus(whisperModel: loadedSettings.whisperModel, mlxModelID: loadedSettings.localLLMModel)
+    }
+
+    @MainActor private func handleRouteTransition(
+        _ status: DualAudioCaptureService.TransitionStatus
+    ) {
+        switch status {
+        case .switching(let previous, let current):
+            routeTransitionMessage = "Switching audio device…"
+            addDiagnostic(
+                "Audio route transition: \(previous.description) → \(current.description)",
+                level: .warning
+            )
+        case .restored(let route):
+            routeTransitionMessage = nil
+            addDiagnostic("Audio route reconnected: \(route.description)")
+        case .degraded(let message):
+            routeTransitionMessage = message
+            addDiagnostic(message, level: .warning)
+        }
     }
 
     // MARK: - Provider factory
@@ -163,6 +188,7 @@ public final class AutoScribeController: ObservableObject {
         Task {
             do {
                 let result = try await audioCaptureService.stop()
+                routeTransitionMessage = nil
                 inactivityMonitor?.stop()
                 inactivityMonitor = nil
                 addDiagnostic("Audio capture stopped. Files: \(result.files.map { $0.url.lastPathComponent }.joined(separator: ", "))")
@@ -183,6 +209,7 @@ public final class AutoScribeController: ObservableObject {
         addDiagnostic("Discard recording requested during app termination.", level: .warning)
         do {
             let result = try await audioCaptureService.stop()
+            routeTransitionMessage = nil
             inactivityMonitor?.stop()
             inactivityMonitor = nil
             cleanupTemporaryFiles(for: result.session)
@@ -402,6 +429,7 @@ public final class AutoScribeController: ObservableObject {
     @MainActor private func fail(_ error: Error) {
         let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         lastError = message
+        routeTransitionMessage = nil
         setState(.failed(message))
         addDiagnostic(message, level: .error)
         inactivityMonitor?.stop()

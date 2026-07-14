@@ -28,13 +28,14 @@ public final class CoreAudioTapSystemAudioRecorder: SystemAudioRecording, @unche
 
     public init() {}
 
-    public func start(in directory: URL) async throws -> URL {
+    public func start(in directory: URL, filename: String = "system-audio.wav") async throws -> URL {
         guard outputURL == nil else {
             throw AudioCaptureError.alreadyRecording
         }
 
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let url = directory.appendingPathComponent("system-audio.wav")
+        let url = directory.appendingPathComponent(filename)
+        try? FileManager.default.removeItem(at: url)
 
         do {
             let tapUUID = UUID()

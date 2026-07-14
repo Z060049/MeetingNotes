@@ -16,7 +16,7 @@ public final class SystemAudioRecorder: NSObject, SystemAudioRecording, SCStream
 
     public var onAudioLevel: ((Float) -> Void)?
 
-    public func start(in directory: URL) async throws -> URL {
+    public func start(in directory: URL, filename: String = "system-audio.m4a") async throws -> URL {
         guard stream == nil else {
             throw AudioCaptureError.alreadyRecording
         }
@@ -38,7 +38,11 @@ public final class SystemAudioRecorder: NSObject, SystemAudioRecording, SCStream
         configuration.height = 2
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: 1)
 
-        let url = directory.appendingPathComponent("system-audio.m4a")
+        let url = directory
+            .appendingPathComponent(filename)
+            .deletingPathExtension()
+            .appendingPathExtension("m4a")
+        try? FileManager.default.removeItem(at: url)
         let writer = try AVAssetWriter(outputURL: url, fileType: .m4a)
         let writerInput = AVAssetWriterInput(
             mediaType: .audio,

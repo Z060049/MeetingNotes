@@ -1,138 +1,312 @@
 import AVFoundation
+import CoreMedia
 import Foundation
 
-public final class MicrophoneRecorder: @unchecked Sendable {
-    private let engine = AVAudioEngine()
-    private let fileLock = NSLock()
-    private var audioFile: AVAudioFile?
+public protocol MicrophoneRecording: AnyObject, Sendable {
+    var onAudioLevel: ((Float) -> Void)? { get set }
+    var onInterruption: (@Sendable (String) -> Void)? { get set }
+
+    func start(
+        in directory: URL,
+        filename: String,
+        deviceUID: String?,
+        deviceName: String?
+    ) async throws -> URL
+    func waitForFirstBuffer(timeoutSeconds: TimeInterval) async -> Bool
+    func stop() async throws -> URL
+}
+
+/// Restartable microphone capture bound to an explicit device.
+///
+/// `AVAudioEngine.inputNode` can raise an uncaught Objective-C exception when
+/// the default input disappears during a route switch. AVCaptureSession reports
+/// device loss as an interruption/runtime error, allowing the coordinator to
+/// finalize the current segment and reconnect safely.
+public final class MicrophoneRecorder: NSObject, MicrophoneRecording, @unchecked Sendable {
+    private let captureQueue = DispatchQueue(label: "com.autoscribe.microphone-capture")
+    private let stateLock = NSLock()
+
+    private var session: AVCaptureSession?
+    private var dataOutput: AVCaptureAudioDataOutput?
+    private var writer: AVAssetWriter?
+    private var writerInput: AVAssetWriterInput?
     private var outputURL: URL?
-    private var firstBufferContinuation: CheckedContinuation<Bool, Never>?
     private var didReceiveFirstBuffer = false
+    private var writeError: Error?
 
     public var onAudioLevel: ((Float) -> Void)?
+    public var onInterruption: (@Sendable (String) -> Void)?
 
-    public init() {}
+    public override init() {
+        super.init()
+    }
 
-    public func start(in directory: URL) async throws -> URL {
-        guard outputURL == nil else {
-            throw AudioCaptureError.alreadyRecording
-        }
-
+    public func start(
+        in directory: URL,
+        filename: String = "microphone.wav",
+        deviceUID: String? = nil,
+        deviceName: String? = nil
+    ) async throws -> URL {
         guard await requestMicrophoneAccess() else {
             throw AudioCaptureError.microphonePermissionDenied
         }
 
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent(filename)
+        try? FileManager.default.removeItem(at: url)
 
-        let input = engine.inputNode
-        let url = directory.appendingPathComponent("microphone.wav")
+        return try await withCheckedThrowingContinuation { continuation in
+            captureQueue.async { [weak self] in
+                guard let self else {
+                    continuation.resume(throwing: AudioCaptureError.writerUnavailable)
+                    return
+                }
 
-        engine.stop()
-        engine.reset()
-        input.removeTap(onBus: 0)
+                do {
+                    guard self.outputURL == nil else {
+                        throw AudioCaptureError.alreadyRecording
+                    }
 
-        outputURL = url
-        didReceiveFirstBuffer = false
-        input.installTap(onBus: 0, bufferSize: 4_096, format: nil) { [weak self] buffer, _ in
-            guard let self else {
-                return
-            }
+                    let device = try Self.captureDevice(uid: deviceUID, name: deviceName)
+                    let input = try AVCaptureDeviceInput(device: device)
+                    let session = AVCaptureSession()
+                    session.beginConfiguration()
+                    guard session.canAddInput(input) else {
+                        session.commitConfiguration()
+                        throw AudioCaptureError.unsupportedInputRoute(
+                            "The selected microphone could not be added to the capture session."
+                        )
+                    }
+                    session.addInput(input)
 
-            do {
-                let file = try self.audioFile(for: buffer, url: url)
-                try file.write(from: buffer)
-                self.markFirstBufferReceived()
-                self.onAudioLevel?(buffer.rootMeanSquarePower)
-            } catch {
-                self.onAudioLevel?(0)
+                    let output = AVCaptureAudioDataOutput()
+                    guard session.canAddOutput(output) else {
+                        session.commitConfiguration()
+                        throw AudioCaptureError.writerUnavailable
+                    }
+                    session.addOutput(output)
+                    output.setSampleBufferDelegate(self, queue: self.captureQueue)
+                    session.commitConfiguration()
+
+                    self.stateLock.lock()
+                    self.outputURL = url
+                    self.session = session
+                    self.dataOutput = output
+                    self.didReceiveFirstBuffer = false
+                    self.writeError = nil
+                    self.stateLock.unlock()
+
+                    self.installSessionObservers(session)
+                    session.startRunning()
+                    guard session.isRunning else {
+                        self.removeSessionObservers()
+                        self.clearState()
+                        throw AudioCaptureError.captureStartupTimedOut(
+                            "The selected microphone did not start."
+                        )
+                    }
+
+                    continuation.resume(returning: url)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
             }
         }
-
-        engine.prepare()
-        try engine.start()
-
-        return url
     }
 
     public func waitForFirstBuffer(timeoutSeconds: TimeInterval) async -> Bool {
-        if didReceiveFirstBuffer {
-            return true
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            if stateLock.withLock({ didReceiveFirstBuffer }) {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
         }
+        return stateLock.withLock { didReceiveFirstBuffer }
+    }
 
-        return await withTaskGroup(of: Bool.self) { group in
-            group.addTask { [weak self] in
+    public func stop() async throws -> URL {
+        try await withCheckedThrowingContinuation { continuation in
+            captureQueue.async { [weak self] in
                 guard let self else {
-                    return false
+                    continuation.resume(throwing: AudioCaptureError.notRecording)
+                    return
                 }
-                return await withCheckedContinuation { continuation in
-                    self.fileLock.lock()
-                    if self.didReceiveFirstBuffer {
-                        self.fileLock.unlock()
-                        continuation.resume(returning: true)
+
+                self.stateLock.lock()
+                guard let url = self.outputURL else {
+                    self.stateLock.unlock()
+                    continuation.resume(throwing: AudioCaptureError.notRecording)
+                    return
+                }
+                let session = self.session
+                let writer = self.writer
+                let writerInput = self.writerInput
+                let writeError = self.writeError
+                self.stateLock.unlock()
+
+                self.removeSessionObservers()
+                self.dataOutput?.setSampleBufferDelegate(nil, queue: nil)
+                session?.stopRunning()
+                writerInput?.markAsFinished()
+
+                guard let writer else {
+                    self.clearState()
+                    if let writeError {
+                        continuation.resume(throwing: writeError)
                     } else {
-                        self.firstBufferContinuation = continuation
-                        self.fileLock.unlock()
+                        continuation.resume(returning: url)
+                    }
+                    return
+                }
+
+                writer.finishWriting { [weak self] in
+                    let status = writer.status
+                    let error = writer.error ?? writeError
+                    self?.clearState()
+                    if status == .failed || status == .cancelled {
+                        continuation.resume(throwing: error ?? AudioCaptureError.writerUnavailable)
+                    } else {
+                        continuation.resume(returning: url)
                     }
                 }
             }
-
-            group.addTask {
-                try? await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000))
-                return false
-            }
-
-            let result = await group.next() ?? false
-            group.cancelAll()
-            return result
         }
     }
 
-    public func stop() throws -> URL {
-        guard let outputURL else {
-            throw AudioCaptureError.notRecording
-        }
-
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
-        resumeFirstBufferContinuationIfNeeded()
-        audioFile = nil
-        self.outputURL = nil
-        return outputURL
-    }
-
-    private func markFirstBufferReceived() {
-        fileLock.lock()
-        didReceiveFirstBuffer = true
-        let continuation = firstBufferContinuation
-        firstBufferContinuation = nil
-        fileLock.unlock()
-        continuation?.resume(returning: true)
-    }
-
-    private func resumeFirstBufferContinuationIfNeeded() {
-        fileLock.lock()
-        let continuation = firstBufferContinuation
-        firstBufferContinuation = nil
-        fileLock.unlock()
-        continuation?.resume(returning: false)
-    }
-
-    private func audioFile(for buffer: AVAudioPCMBuffer, url: URL) throws -> AVAudioFile {
-        fileLock.lock()
-        defer { fileLock.unlock() }
-
-        if let audioFile {
-            return audioFile
-        }
-
-        let format = buffer.format
-        guard format.sampleRate > 0, format.channelCount > 0 else {
+    private func configureWriter(for sampleBuffer: CMSampleBuffer, url: URL) throws {
+        guard writer == nil else { return }
+        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let streamDescription = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription) else {
             throw AudioCaptureError.writerUnavailable
         }
 
-        let file = try AVAudioFile(forWriting: url, settings: format.settings)
-        audioFile = file
-        return file
+        let writer = try AVAssetWriter(outputURL: url, fileType: .wav)
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: streamDescription.pointee.mSampleRate,
+            AVNumberOfChannelsKey: Int(streamDescription.pointee.mChannelsPerFrame),
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false
+        ]
+        let input = AVAssetWriterInput(mediaType: .audio, outputSettings: settings)
+        input.expectsMediaDataInRealTime = true
+        guard writer.canAdd(input) else {
+            throw AudioCaptureError.writerUnavailable
+        }
+        writer.add(input)
+        guard writer.startWriting() else {
+            throw writer.error ?? AudioCaptureError.writerUnavailable
+        }
+        writer.startSession(atSourceTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+        self.writer = writer
+        self.writerInput = input
+    }
+
+    private func markFirstBufferReceived() {
+        stateLock.withLock {
+            didReceiveFirstBuffer = true
+        }
+    }
+
+    private func clearState() {
+        stateLock.lock()
+        session = nil
+        dataOutput = nil
+        writer = nil
+        writerInput = nil
+        outputURL = nil
+        writeError = nil
+        stateLock.unlock()
+    }
+
+    private func installSessionObservers(_ session: AVCaptureSession) {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(sessionWasInterrupted(_:)),
+            name: AVCaptureSession.wasInterruptedNotification,
+            object: session
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(sessionRuntimeError(_:)),
+            name: AVCaptureSession.runtimeErrorNotification,
+            object: session
+        )
+    }
+
+    private func removeSessionObservers() {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func sessionWasInterrupted(_ notification: Notification) {
+        onInterruption?("Microphone capture was interrupted by an audio-device change.")
+    }
+
+    @objc private func sessionRuntimeError(_ notification: Notification) {
+        let message = (notification.userInfo?[AVCaptureSessionErrorKey] as? Error)?
+            .localizedDescription ?? "unknown capture error"
+        onInterruption?("Microphone capture reported: \(message)")
+    }
+
+    private static func captureDevice(uid: String?, name: String?) throws -> AVCaptureDevice {
+        let devices = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.microphone],
+            mediaType: .audio,
+            position: .unspecified
+        ).devices
+        if uid != nil || name != nil {
+            if let index = bestMatchingDeviceIndex(
+                requestedUID: uid,
+                requestedName: name,
+                candidates: devices.map { (uid: $0.uniqueID, name: $0.localizedName) }
+            ) {
+                return devices[index]
+            }
+            throw AudioCaptureError.unsupportedInputRoute(
+                "The selected microphone is not ready in AVFoundation yet."
+            )
+        }
+        if let defaultDevice = AVCaptureDevice.default(for: .audio) {
+            return defaultDevice
+        }
+        throw AudioCaptureError.unsupportedInputRoute("No microphone input device is available.")
+    }
+
+    static func bestMatchingDeviceIndex(
+        requestedUID: String?,
+        requestedName: String?,
+        candidates: [(uid: String, name: String)]
+    ) -> Int? {
+        if let requestedUID,
+           let index = candidates.firstIndex(where: { $0.uid == requestedUID }) {
+            return index
+        }
+        if let requestedUID {
+            let normalized = normalizedDeviceIdentifier(requestedUID)
+            if let index = candidates.firstIndex(where: {
+                normalizedDeviceIdentifier($0.uid) == normalized
+            }) {
+                return index
+            }
+        }
+        if let requestedName,
+           let index = candidates.firstIndex(where: {
+               $0.name.compare(requestedName, options: [.caseInsensitive, .diacriticInsensitive]) == .orderedSame
+           }) {
+            return index
+        }
+        return nil
+    }
+
+    private static func normalizedDeviceIdentifier(_ value: String) -> String {
+        var value = value.lowercased()
+        for suffix in [":input", ":output"] where value.hasSuffix(suffix) {
+            value.removeLast(suffix.count)
+        }
+        return String(value.filter { $0.isLetter || $0.isNumber })
     }
 
     private func requestMicrophoneAccess() async -> Bool {
@@ -142,33 +316,101 @@ public final class MicrophoneRecorder: @unchecked Sendable {
             }
         }
     }
-
 }
 
-private extension AVAudioPCMBuffer {
-    var rootMeanSquarePower: Float {
-        guard let channelData = floatChannelData, frameLength > 0 else {
+extension MicrophoneRecorder: AVCaptureAudioDataOutputSampleBufferDelegate {
+    public func captureOutput(
+        _ output: AVCaptureOutput,
+        didOutput sampleBuffer: CMSampleBuffer,
+        from connection: AVCaptureConnection
+    ) {
+        stateLock.lock()
+        guard let url = outputURL else {
+            stateLock.unlock()
+            return
+        }
+        stateLock.unlock()
+
+        do {
+            try configureWriter(for: sampleBuffer, url: url)
+            guard let writerInput, writerInput.isReadyForMoreMediaData else { return }
+            guard writerInput.append(sampleBuffer) else {
+                throw writer?.error ?? AudioCaptureError.writerUnavailable
+            }
+            markFirstBufferReceived()
+            onAudioLevel?(Self.audioLevel(in: sampleBuffer))
+        } catch {
+            stateLock.lock()
+            writeError = error
+            stateLock.unlock()
+            onAudioLevel?(0)
+        }
+    }
+
+    private static func audioLevel(in sampleBuffer: CMSampleBuffer) -> Float {
+        guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription) else {
             return 0
         }
 
-        let frameCount = Int(frameLength)
-        let channelCount = Int(format.channelCount)
-        let frameStride = 16
-        var sum: Float = 0
-        var sampledCount = 0
+        var neededSize = 0
+        var blockBuffer: CMBlockBuffer?
+        let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            bufferListSizeNeededOut: &neededSize,
+            bufferListOut: nil,
+            bufferListSize: 0,
+            blockBufferAllocator: kCFAllocatorDefault,
+            blockBufferMemoryAllocator: kCFAllocatorDefault,
+            flags: 0,
+            blockBufferOut: &blockBuffer
+        )
+        guard status == noErr, neededSize > 0 else { return 0 }
 
-        for channel in 0..<channelCount {
-            let samples = channelData[channel]
-            var frame = 0
-            while frame < frameCount {
-                let sample = samples[frame]
-                sum += sample * sample
-                sampledCount += 1
-                frame += frameStride
-            }
+        let rawPointer = UnsafeMutableRawPointer.allocate(
+            byteCount: neededSize,
+            alignment: MemoryLayout<AudioBufferList>.alignment
+        )
+        defer { rawPointer.deallocate() }
+        let audioBufferList = rawPointer.bindMemory(to: AudioBufferList.self, capacity: 1)
+        guard CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            bufferListSizeNeededOut: nil,
+            bufferListOut: audioBufferList,
+            bufferListSize: neededSize,
+            blockBufferAllocator: kCFAllocatorDefault,
+            blockBufferMemoryAllocator: kCFAllocatorDefault,
+            flags: 0,
+            blockBufferOut: &blockBuffer
+        ) == noErr else {
+            return 0
         }
 
-        let mean = sum / Float(max(sampledCount, 1))
-        return sqrt(mean)
+        var sum: Double = 0
+        var sampleCount = 0
+        let buffers = UnsafeMutableAudioBufferListPointer(audioBufferList)
+        let isFloat = asbd.pointee.mFormatFlags & kAudioFormatFlagIsFloat != 0
+        for buffer in buffers {
+            guard let data = buffer.mData else { continue }
+            if isFloat, asbd.pointee.mBitsPerChannel == 32 {
+                let count = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
+                let values = data.assumingMemoryBound(to: Float.self)
+                for index in stride(from: 0, to: count, by: 16) {
+                    let value = Double(values[index])
+                    sum += value * value
+                    sampleCount += 1
+                }
+            } else if asbd.pointee.mBitsPerChannel == 16 {
+                let count = Int(buffer.mDataByteSize) / MemoryLayout<Int16>.size
+                let values = data.assumingMemoryBound(to: Int16.self)
+                for index in stride(from: 0, to: count, by: 16) {
+                    let value = Double(values[index]) / Double(Int16.max)
+                    sum += value * value
+                    sampleCount += 1
+                }
+            }
+        }
+        guard sampleCount > 0 else { return 0 }
+        return Float(sqrt(sum / Double(sampleCount)))
     }
 }

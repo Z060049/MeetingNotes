@@ -12,6 +12,17 @@ public enum AudioLevelAnalyzer {
         public let isSilent: Bool
     }
 
+    public struct TrimmedAudio: Equatable, Sendable {
+        public let url: URL
+        /// Seconds removed from the beginning of the original file.
+        public let startOffset: TimeInterval
+
+        public init(url: URL, startOffset: TimeInterval) {
+            self.url = url
+            self.startOffset = startOffset
+        }
+    }
+
     /// Window size (in frames) used to evaluate RMS while scanning for signal.
     private static let windowFrames: AVAudioFrameCount = 4_096
     private static let frameStride = 16
@@ -43,14 +54,15 @@ public enum AudioLevelAnalyzer {
         return Analysis(peakRMS: peak, isSilent: peak < threshold)
     }
 
-    /// Returns a URL to audio with leading/trailing silence removed. If the
+    /// Returns audio with leading/trailing silence removed and its original
+    /// timeline offset. If the
     /// input has no signal above the threshold, returns `nil` (caller skips).
-    /// If nothing needs trimming, returns the original URL.
+    /// If nothing needs trimming, returns the original URL with a zero offset.
     public static func trimmedSilence(
         url: URL,
         threshold: Float = defaultSilenceThreshold,
         padding: TimeInterval = 0.3
-    ) throws -> URL? {
+    ) throws -> TrimmedAudio? {
         let file = try AVAudioFile(forReading: url)
         let format = file.processingFormat
         let totalFrames = file.length
@@ -96,10 +108,19 @@ public enum AudioLevelAnalyzer {
 
         // Nothing meaningful to trim: keep the original file.
         if start == 0 && end == totalFrames {
-            return url
+            return TrimmedAudio(url: url, startOffset: 0)
         }
 
-        return try writeTrimmed(from: file, format: format, start: start, frameCount: AVAudioFrameCount(trimmedCount))
+        let trimmedURL = try writeTrimmed(
+            from: file,
+            format: format,
+            start: start,
+            frameCount: AVAudioFrameCount(trimmedCount)
+        )
+        return TrimmedAudio(
+            url: trimmedURL,
+            startOffset: TimeInterval(start) / format.sampleRate
+        )
     }
 
     private static func writeTrimmed(

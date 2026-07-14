@@ -32,8 +32,14 @@ public final class OpenAIProcessingProvider: ProcessingProvider, @unchecked Send
         }
 
         let transcript = try await transcribe(capture: capture, apiKey: apiKey)
-        let deduplicated = TranscriptDeduplicator.deduplicate(transcript)
-        let cleaned = TranscriptDeduplicator.collapseRepeatedSentences(deduplicated)
+        let deduplication = TranscriptDeduplicator.deduplicateWithReport(transcript)
+        let cleaned = TranscriptDeduplicator.collapseRepeatedSentences(deduplication.transcript)
+        let report = deduplication.report
+        PersistentDiagnosticLog.shared.log(
+            "Transcript deduplication: mic sentences \(report.microphoneSentencesBefore) → "
+                + "\(report.microphoneSentencesAfter), removed \(report.removedSentenceCount) "
+                + "(similarity: \(report.removedBySimilarity), coverage: \(report.removedByCoverage))."
+        )
 
         // Notify the controller that the transcript is ready before summarization.
         await onTranscriptReady?(cleaned)
@@ -97,7 +103,8 @@ public final class OpenAIProcessingProvider: ProcessingProvider, @unchecked Send
 
             // Fall back to the original file when no active frames are found above
             // threshold — skipping outright was too aggressive for quiet mics.
-            let uploadURL = (try? AudioLevelAnalyzer.trimmedSilence(url: file.url)) ?? file.url
+            let trimmedAudio = try? AudioLevelAnalyzer.trimmedSilence(url: file.url)
+            let uploadURL = trimmedAudio?.url ?? file.url
             defer {
                 if uploadURL != file.url {
                     try? FileManager.default.removeItem(at: uploadURL)

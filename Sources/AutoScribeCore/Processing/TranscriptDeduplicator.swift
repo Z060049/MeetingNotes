@@ -25,6 +25,22 @@ import Foundation
 /// Falls back to the original sentence-level Jaccard + Levenshtein + bigram
 /// coverage approach when no timing data is present.
 public enum TranscriptDeduplicator {
+    public struct DeduplicationReport: Equatable, Sendable {
+        public let microphoneSentencesBefore: Int
+        public let microphoneSentencesAfter: Int
+        public let removedBySimilarity: Int
+        public let removedByCoverage: Int
+
+        public var removedSentenceCount: Int {
+            microphoneSentencesBefore - microphoneSentencesAfter
+        }
+    }
+
+    public struct DeduplicationResult: Equatable, Sendable {
+        public let transcript: Transcript
+        public let report: DeduplicationReport
+    }
+
     public static let defaultThreshold: Double = 0.82
 
     /// Maximum seconds between a system-audio segment and its microphone echo.
@@ -35,13 +51,51 @@ public enum TranscriptDeduplicator {
     // MARK: - Public API
 
     public static func deduplicate(_ transcript: Transcript, threshold: Double = defaultThreshold) -> Transcript {
-        let systemSegments = transcript.segments.filter { $0.speaker == AudioSource.systemAudio.rawValue }
-        guard !systemSegments.isEmpty else { return transcript }
+        deduplicateWithReport(transcript, threshold: threshold).transcript
+    }
 
-        if systemSegments.contains(where: { $0.startTime != nil }) {
-            return deduplicateTimestamped(transcript, systemSegments: systemSegments, threshold: threshold)
+    public static func deduplicateWithReport(
+        _ transcript: Transcript,
+        threshold: Double = defaultThreshold
+    ) -> DeduplicationResult {
+        let systemSegments = transcript.segments.filter { $0.speaker == AudioSource.systemAudio.rawValue }
+        let beforeCount = microphoneSentenceCount(in: transcript)
+        guard !systemSegments.isEmpty else {
+            return DeduplicationResult(
+                transcript: transcript,
+                report: DeduplicationReport(
+                    microphoneSentencesBefore: beforeCount,
+                    microphoneSentencesAfter: beforeCount,
+                    removedBySimilarity: 0,
+                    removedByCoverage: 0
+                )
+            )
         }
-        return deduplicateTextOnly(transcript, systemSegments: systemSegments, threshold: threshold)
+
+        let deduplicated: (transcript: Transcript, similarity: Int, coverage: Int)
+        if systemSegments.contains(where: { $0.startTime != nil }) {
+            deduplicated = deduplicateTimestamped(
+                transcript,
+                systemSegments: systemSegments,
+                threshold: threshold
+            )
+        } else {
+            deduplicated = deduplicateTextOnly(
+                transcript,
+                systemSegments: systemSegments,
+                threshold: threshold
+            )
+        }
+
+        return DeduplicationResult(
+            transcript: deduplicated.transcript,
+            report: DeduplicationReport(
+                microphoneSentencesBefore: beforeCount,
+                microphoneSentencesAfter: microphoneSentenceCount(in: deduplicated.transcript),
+                removedBySimilarity: deduplicated.similarity,
+                removedByCoverage: deduplicated.coverage
+            )
+        )
     }
 
     /// Collapses runs of consecutive identical sentences within each segment
@@ -76,7 +130,12 @@ public enum TranscriptDeduplicator {
             let rejoined = kept.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
             guard !rejoined.isEmpty else { continue }
 
-            let collapsed = TranscriptSegment(speaker: segment.speaker, startTime: segment.startTime, text: rejoined)
+            let collapsed = TranscriptSegment(
+                speaker: segment.speaker,
+                startTime: segment.startTime,
+                endTime: segment.endTime,
+                text: rejoined
+            )
 
             // Cross-segment: drop if the immediately preceding output segment from
             // the same speaker is identical (catches fine-grained hallucination runs).
@@ -99,7 +158,7 @@ public enum TranscriptDeduplicator {
         _ transcript: Transcript,
         systemSegments: [TranscriptSegment],
         threshold: Double
-    ) -> Transcript {
+    ) -> (transcript: Transcript, similarity: Int, coverage: Int) {
         // When timestamp proximity corroborates an echo we accept a slightly lower
         // text-similarity bar — the timing evidence compensates.
         let timestampedThreshold = max(threshold - 0.15, 0.60)
@@ -112,6 +171,8 @@ public enum TranscriptDeduplicator {
         let referenceBigrams = Set(bigrams(of: referenceSentences.joined(separator: " ")))
 
         var result: [TranscriptSegment] = []
+        var removedBySimilarity = 0
+        var removedByCoverage = 0
 
         for segment in transcript.segments {
             guard segment.speaker == AudioSource.microphone.rawValue else {
@@ -122,34 +183,79 @@ public enum TranscriptDeduplicator {
             let normalizedMic = normalize(segment.text)
             guard !normalizedMic.isEmpty else { continue }
 
-            if let micTime = segment.startTime {
-                // Collect system-audio segments whose timing overlaps this mic segment.
-                let nearbySystemTexts = systemSegments.compactMap { sys -> String? in
-                    guard let sysTime = sys.startTime,
-                          abs(micTime - sysTime) <= echoWindow else { return nil }
-                    let n = normalize(sys.text)
-                    return n.isEmpty ? nil : n
+            if segment.startTime != nil {
+                // Compare against the combined nearby window rather than requiring
+                // Whisper to split microphone and system audio at identical points.
+                let nearbySystemSegments = systemSegments.filter { sys in
+                    guard sys.startTime != nil else { return false }
+                    return intervalsAreNearby(segment, sys, window: echoWindow)
                 }
 
-                if nearbySystemTexts.isEmpty {
+                if nearbySystemSegments.isEmpty {
                     // No system-audio activity near this timestamp → genuine mic content.
                     result.append(segment)
                     continue
                 }
 
-                let isEcho = nearbySystemTexts.contains { similarity(normalizedMic, $0) >= timestampedThreshold }
-                if !isEcho { result.append(segment) }
+                let nearbySentences = nearbySystemSegments
+                    .flatMap { sentences(in: $0.text) }
+                    .map { normalize($0) }
+                    .filter { !$0.isEmpty }
+                let nearbyText = nearbySystemSegments
+                    .map { normalize($0.text) }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: " ")
+                let nearbyBigrams = Set(bigrams(of: nearbyText))
+
+                var keptSentences: [String] = []
+                for sentence in sentences(in: segment.text) {
+                    let normalized = normalize(sentence)
+                    guard !normalized.isEmpty else { continue }
+
+                    switch timestampedEchoReason(
+                        microphoneText: normalized,
+                        nearbySystemSentences: nearbySentences,
+                        nearbySystemText: nearbyText,
+                        nearbySystemBigrams: nearbyBigrams,
+                        threshold: timestampedThreshold
+                    ) {
+                    case .similarity:
+                        removedBySimilarity += 1
+                    case .coverage:
+                        removedByCoverage += 1
+                    case nil:
+                        keptSentences.append(sentence)
+                    }
+                }
+
+                let rejoined = keptSentences
+                    .joined(separator: " ")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !rejoined.isEmpty {
+                    result.append(TranscriptSegment(
+                        speaker: segment.speaker,
+                        startTime: segment.startTime,
+                        endTime: segment.endTime,
+                        text: rejoined
+                    ))
+                }
 
             } else {
                 // Mic segment has no timestamp (unusual in the timestamped path but
                 // possible for error segments): use text-only check as a safety net.
                 let matchesSentence = referenceSentences.contains { similarity(normalizedMic, $0) >= threshold }
                 let coversBigrams = bigramCoverage(of: normalizedMic, in: referenceBigrams) >= 0.60
-                if !matchesSentence && !coversBigrams { result.append(segment) }
+                if matchesSentence {
+                    removedBySimilarity += sentences(in: segment.text).count
+                } else if coversBigrams {
+                    removedByCoverage += sentences(in: segment.text).count
+                } else {
+                    result.append(segment)
+                }
             }
         }
 
-        return Transcript(segments: result)
+        return (Transcript(segments: result), removedBySimilarity, removedByCoverage)
     }
 
     // MARK: - Text-only path (API / no timestamps)
@@ -158,7 +264,7 @@ public enum TranscriptDeduplicator {
         _ transcript: Transcript,
         systemSegments: [TranscriptSegment],
         threshold: Double
-    ) -> Transcript {
+    ) -> (transcript: Transcript, similarity: Int, coverage: Int) {
         let referenceSentences = systemSegments
             .flatMap { sentences(in: $0.text) }
             .map { normalize($0) }
@@ -172,6 +278,8 @@ public enum TranscriptDeduplicator {
         let referenceBigrams = Set(bigrams(of: fullReferenceText))
 
         var result: [TranscriptSegment] = []
+        var removedBySimilarity = 0
+        var removedByCoverage = 0
 
         for segment in transcript.segments {
             guard segment.speaker == AudioSource.microphone.rawValue else {
@@ -184,24 +292,98 @@ public enum TranscriptDeduplicator {
                 let normalized = normalize(sentence)
                 if normalized.isEmpty { return false }
                 let matchesSentence = referenceSentences.contains { similarity(normalized, $0) >= threshold }
-                if matchesSentence { return false }
+                if matchesSentence {
+                    removedBySimilarity += 1
+                    return false
+                }
 
                 // Secondary check: if most of this sentence's bigrams appear
                 // anywhere in the system audio, it is speaker bleed even if no
                 // single reference sentence matched it closely enough.
-                return bigramCoverage(of: normalized, in: referenceBigrams) < 0.60
+                if bigramCoverage(of: normalized, in: referenceBigrams) >= 0.60 {
+                    removedByCoverage += 1
+                    return false
+                }
+                return true
             }
 
             let rejoined = keptSentences.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
             guard !rejoined.isEmpty else { continue }
 
-            result.append(TranscriptSegment(speaker: segment.speaker, startTime: segment.startTime, text: rejoined))
+            result.append(TranscriptSegment(
+                speaker: segment.speaker,
+                startTime: segment.startTime,
+                endTime: segment.endTime,
+                text: rejoined
+            ))
         }
 
-        return Transcript(segments: result)
+        return (Transcript(segments: result), removedBySimilarity, removedByCoverage)
     }
 
     // MARK: - Text helpers
+
+    private enum EchoReason {
+        case similarity
+        case coverage
+    }
+
+    private static func timestampedEchoReason(
+        microphoneText: String,
+        nearbySystemSentences: [String],
+        nearbySystemText: String,
+        nearbySystemBigrams: Set<String>,
+        threshold: Double
+    ) -> EchoReason? {
+        let wordCount = microphoneText.split(separator: " ").count
+        guard wordCount >= 3 else {
+            // One- and two-word responses ("yes", "sounds good") are too easy
+            // to remove incorrectly when both sides speak at once.
+            return nil
+        }
+
+        if nearbySystemSentences.contains(where: {
+            similarity(microphoneText, $0) >= threshold
+                || $0 == microphoneText
+        }) {
+            return .similarity
+        }
+
+        // Exact phrase containment catches short fragments that Whisper splits
+        // away from a larger sentence on the other stream.
+        if nearbySystemText.contains(microphoneText) {
+            return .similarity
+        }
+
+        let coverage = bigramCoverage(
+            of: microphoneText,
+            in: nearbySystemBigrams
+        )
+        if wordCount >= 4, coverage >= 0.60 {
+            return .coverage
+        }
+
+        return nil
+    }
+
+    private static func intervalsAreNearby(
+        _ lhs: TranscriptSegment,
+        _ rhs: TranscriptSegment,
+        window: TimeInterval
+    ) -> Bool {
+        guard let lhsStart = lhs.startTime, let rhsStart = rhs.startTime else {
+            return false
+        }
+        let lhsEnd = max(lhsStart, lhs.endTime ?? lhsStart)
+        let rhsEnd = max(rhsStart, rhs.endTime ?? rhsStart)
+        return lhsStart <= rhsEnd + window && rhsStart <= lhsEnd + window
+    }
+
+    private static func microphoneSentenceCount(in transcript: Transcript) -> Int {
+        transcript.segments
+            .filter { $0.speaker == AudioSource.microphone.rawValue }
+            .reduce(0) { $0 + sentences(in: $1.text).count }
+    }
 
     static func sentences(in text: String) -> [String] {
         var results: [String] = []

@@ -5,13 +5,17 @@ public protocol SystemAudioRecording: AnyObject, Sendable {
     var diagnosticSummary: String? { get }
     var onAudioLevel: ((Float) -> Void)? { get set }
 
-    func start(in directory: URL) async throws -> URL
+    func start(in directory: URL, filename: String) async throws -> URL
     func stop() async throws -> URL
 }
 
 public extension SystemAudioRecording {
     var diagnosticSummary: String? {
         nil
+    }
+
+    func start(in directory: URL) async throws -> URL {
+        try await start(in: directory, filename: "system-audio.wav")
     }
 }
 

@@ -247,4 +247,121 @@ final class TranscriptDeduplicatorTests: XCTestCase {
         XCTAssertEqual(result.segments.count, 1)
         XCTAssertEqual(result.segments.first?.speaker, AudioSource.systemAudio.rawValue)
     }
+
+    func testTimestampedWindowRemovesMicFragmentsOfOneLongSystemSegment() {
+        let transcript = Transcript(segments: [
+            TranscriptSegment(
+                speaker: AudioSource.microphone.rawValue,
+                startTime: 11,
+                endTime: 13,
+                text: "Like, it is not an engineering team thing."
+            ),
+            TranscriptSegment(
+                speaker: AudioSource.microphone.rawValue,
+                startTime: 13,
+                endTime: 15,
+                text: "It is not like a product team thing."
+            ),
+            TranscriptSegment(
+                speaker: AudioSource.systemAudio.rawValue,
+                startTime: 8,
+                endTime: 16,
+                text: "Like, it is not an engineering team thing, it is not like a product team thing, it is company-wide."
+            )
+        ])
+
+        let result = TranscriptDeduplicator.deduplicate(transcript)
+
+        XCTAssertTrue(result.segments.filter { $0.speaker == AudioSource.microphone.rawValue }.isEmpty)
+        XCTAssertEqual(result.segments.filter { $0.speaker == AudioSource.systemAudio.rawValue }.count, 1)
+    }
+
+    func testTimestampedWindowKeepsUniqueSentenceInsideMixedMicSegment() {
+        let transcript = Transcript(segments: [
+            TranscriptSegment(
+                speaker: AudioSource.microphone.rawValue,
+                startTime: 10,
+                endTime: 16,
+                text: "The launch is next Friday. I disagree because legal has not approved it."
+            ),
+            TranscriptSegment(
+                speaker: AudioSource.systemAudio.rawValue,
+                startTime: 9,
+                endTime: 14,
+                text: "The launch is next Friday."
+            )
+        ])
+
+        let result = TranscriptDeduplicator.deduplicate(transcript)
+        let microphone = result.segments.first { $0.speaker == AudioSource.microphone.rawValue }
+
+        XCTAssertEqual(microphone?.text, "I disagree because legal has not approved it.")
+        XCTAssertEqual(microphone?.startTime, 10)
+        XCTAssertEqual(microphone?.endTime, 16)
+    }
+
+    func testTimestampedWindowKeepsShortOverlappingResponse() {
+        let transcript = Transcript(segments: [
+            TranscriptSegment(
+                speaker: AudioSource.microphone.rawValue,
+                startTime: 12,
+                endTime: 13,
+                text: "Sounds good."
+            ),
+            TranscriptSegment(
+                speaker: AudioSource.systemAudio.rawValue,
+                startTime: 10,
+                endTime: 14,
+                text: "The plan sounds good."
+            )
+        ])
+
+        let result = TranscriptDeduplicator.deduplicate(transcript)
+
+        XCTAssertNotNil(result.segments.first { $0.speaker == AudioSource.microphone.rawValue })
+    }
+
+    func testSpeakerOnlyRegressionRemovesSegmentedMicrophoneEcho() {
+        let transcript = Transcript(segments: [
+            TranscriptSegment(
+                speaker: AudioSource.microphone.rawValue,
+                startTime: 11,
+                endTime: 13,
+                text: "It is not an engineering team thing."
+            ),
+            TranscriptSegment(
+                speaker: AudioSource.microphone.rawValue,
+                startTime: 15,
+                endTime: 18,
+                text: "I think a good proxy for how to spend your time is."
+            ),
+            TranscriptSegment(
+                speaker: AudioSource.microphone.rawValue,
+                startTime: 18,
+                endTime: 20,
+                text: "What are things that only you can do?"
+            ),
+            TranscriptSegment(
+                speaker: AudioSource.systemAudio.rawValue,
+                startTime: 8,
+                endTime: 14,
+                text: "It is not an engineering team thing, and it is not like a product team thing."
+            ),
+            TranscriptSegment(
+                speaker: AudioSource.systemAudio.rawValue,
+                startTime: 15,
+                endTime: 20,
+                text: "I think a good proxy for how to spend your time is what are things that only you can do."
+            )
+        ])
+
+        let result = TranscriptDeduplicator.deduplicateWithReport(transcript)
+
+        XCTAssertTrue(result.transcript.segments
+            .filter { $0.speaker == AudioSource.microphone.rawValue }
+            .isEmpty)
+        XCTAssertEqual(result.report.microphoneSentencesBefore, 3)
+        XCTAssertEqual(result.report.microphoneSentencesAfter, 0)
+        XCTAssertEqual(result.report.removedSentenceCount, 3)
+    }
 }

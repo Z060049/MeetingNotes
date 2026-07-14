@@ -3,10 +3,23 @@ import Foundation
 public struct CapturedAudioFile: Equatable, Sendable {
     public let source: AudioSource
     public let url: URL
+    /// Offset from the recording session start to when this source began capture.
+    public let captureStartOffset: TimeInterval
+    public let segmentIndex: Int
+    public let deviceUID: String?
 
-    public init(source: AudioSource, url: URL) {
+    public init(
+        source: AudioSource,
+        url: URL,
+        captureStartOffset: TimeInterval = 0,
+        segmentIndex: Int = 0,
+        deviceUID: String? = nil
+    ) {
         self.source = source
         self.url = url
+        self.captureStartOffset = captureStartOffset
+        self.segmentIndex = segmentIndex
+        self.deviceUID = deviceUID
     }
 }
 

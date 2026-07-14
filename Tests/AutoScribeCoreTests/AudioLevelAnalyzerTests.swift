@@ -56,12 +56,14 @@ final class AudioLevelAnalyzerTests: XCTestCase {
         let analysis = AudioLevelAnalyzer.analyze(url: url)
         XCTAssertEqual(analysis?.isSilent, false)
 
-        let trimmedURL = try XCTUnwrap(try AudioLevelAnalyzer.trimmedSilence(url: url))
-        XCTAssertNotEqual(trimmedURL, url)
-        defer { try? FileManager.default.removeItem(at: trimmedURL) }
+        let trimmedAudio = try XCTUnwrap(try AudioLevelAnalyzer.trimmedSilence(url: url))
+        XCTAssertNotEqual(trimmedAudio.url, url)
+        XCTAssertGreaterThan(trimmedAudio.startOffset, 1.4)
+        XCTAssertLessThan(trimmedAudio.startOffset, 2.0)
+        defer { try? FileManager.default.removeItem(at: trimmedAudio.url) }
 
         let original = try AVAudioFile(forReading: url)
-        let trimmed = try AVAudioFile(forReading: trimmedURL)
+        let trimmed = try AVAudioFile(forReading: trimmedAudio.url)
         XCTAssertLessThan(trimmed.length, original.length)
         // Tone is 1s; with ~0.3s padding each side the trimmed clip should be well under the 5s original.
         XCTAssertLessThan(Double(trimmed.length) / sampleRate, 2.5)

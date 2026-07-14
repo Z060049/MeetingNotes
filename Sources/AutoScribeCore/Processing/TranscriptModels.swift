@@ -3,11 +3,18 @@ import Foundation
 public struct TranscriptSegment: Codable, Equatable, Sendable {
     public let speaker: String
     public let startTime: TimeInterval?
+    public let endTime: TimeInterval?
     public let text: String
 
-    public init(speaker: String = "Speaker", startTime: TimeInterval? = nil, text: String) {
+    public init(
+        speaker: String = "Speaker",
+        startTime: TimeInterval? = nil,
+        endTime: TimeInterval? = nil,
+        text: String
+    ) {
         self.speaker = speaker
         self.startTime = startTime
+        self.endTime = endTime
         self.text = text
     }
 }

@@ -186,7 +186,15 @@ public final class WhisperKitTranscriptionService: ObservableObject, @unchecked 
             // Skipping outright was too aggressive for quiet mics — Whisper will
             // simply return nothing for truly silent audio, and the filler-token
             // filter below handles any hallucinated output.
-            let uploadURL = (try? AudioLevelAnalyzer.trimmedSilence(url: file.url)) ?? file.url
+            var transcriptionAudio = AudioLevelAnalyzer.TrimmedAudio(
+                url: file.url,
+                startOffset: 0
+            )
+            if let trimmed = try? AudioLevelAnalyzer.trimmedSilence(url: file.url) {
+                transcriptionAudio = trimmed
+            }
+            let uploadURL = transcriptionAudio.url
+            let timelineOffset = file.captureStartOffset + transcriptionAudio.startOffset
             defer {
                 if uploadURL != file.url {
                     try? FileManager.default.removeItem(at: uploadURL)
@@ -194,7 +202,11 @@ public final class WhisperKitTranscriptionService: ObservableObject, @unchecked 
             }
 
             do {
-                let options = DecodingOptions(temperature: 0.0, usePrefillPrompt: true)
+                let options = DecodingOptions(
+                    temperature: 0.0,
+                    usePrefillPrompt: true,
+                    skipSpecialTokens: true
+                )
                 let results = try await pipeline.transcribe(
                     audioPath: uploadURL.path,
                     decodeOptions: options
@@ -206,11 +218,12 @@ public final class WhisperKitTranscriptionService: ObservableObject, @unchecked 
                 var addedAny = false
                 for result in results {
                     for seg in result.segments {
-                        let segText = seg.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let segText = Self.sanitizedWhisperText(seg.text)
                         guard !segText.isEmpty, !Self.isWhisperFillerToken(segText) else { continue }
                         segments.append(TranscriptSegment(
                             speaker: file.source.rawValue,
-                            startTime: TimeInterval(seg.start),
+                            startTime: timelineOffset + TimeInterval(seg.start),
+                            endTime: timelineOffset + TimeInterval(seg.end),
                             text: segText
                         ))
                         addedAny = true
@@ -224,9 +237,13 @@ public final class WhisperKitTranscriptionService: ObservableObject, @unchecked 
                     let fallbackText = results
                         .map(\.text)
                         .joined(separator: " ")
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !fallbackText.isEmpty, !Self.isWhisperFillerToken(fallbackText) {
-                        segments.append(TranscriptSegment(speaker: file.source.rawValue, text: fallbackText))
+                    let sanitizedFallback = Self.sanitizedWhisperText(fallbackText)
+                    if !sanitizedFallback.isEmpty, !Self.isWhisperFillerToken(sanitizedFallback) {
+                        segments.append(TranscriptSegment(
+                            speaker: file.source.rawValue,
+                            startTime: timelineOffset,
+                            text: sanitizedFallback
+                        ))
                     }
                 }
             } catch {
@@ -242,6 +259,25 @@ public final class WhisperKitTranscriptionService: ObservableObject, @unchecked 
     }
 
     // MARK: - Private
+
+    static func sanitizedWhisperText(_ text: String) -> String {
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        let withoutControlTokens: String
+        if let regex = try? NSRegularExpression(pattern: #"<\|[^|>]*\|>"#) {
+            withoutControlTokens = regex.stringByReplacingMatches(
+                in: text,
+                range: range,
+                withTemplate: " "
+            )
+        } else {
+            withoutControlTokens = text
+        }
+
+        return withoutControlTokens
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     /// Returns true for Whisper tokens that signal silence or non-speech events
     /// rather than real transcript content (e.g. `[BLANK_AUDIO]`, `[silence]`).

@@ -42,8 +42,14 @@ public final class LocalProcessingProvider: ProcessingProvider, @unchecked Senda
             modelSize: settings.whisperModel
         )
 
-        let deduplicated = TranscriptDeduplicator.deduplicate(rawTranscript)
-        let cleaned = TranscriptDeduplicator.collapseRepeatedSentences(deduplicated)
+        let deduplication = TranscriptDeduplicator.deduplicateWithReport(rawTranscript)
+        let cleaned = TranscriptDeduplicator.collapseRepeatedSentences(deduplication.transcript)
+        let report = deduplication.report
+        PersistentDiagnosticLog.shared.log(
+            "Transcript deduplication: mic sentences \(report.microphoneSentencesBefore) → "
+                + "\(report.microphoneSentencesAfter), removed \(report.removedSentenceCount) "
+                + "(similarity: \(report.removedBySimilarity), coverage: \(report.removedByCoverage))."
+        )
 
         guard !cleaned.segments.isEmpty else {
             throw ProcessingProviderError.localProcessingError(

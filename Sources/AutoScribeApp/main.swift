@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let controller = AutoScribeController()
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
+    private var popoverHostingController: NSHostingController<MenuBarRootView>?
     private var cancellables = Set<AnyCancellable>()
     private var isShowingSilenceAlert = false
     private var isShowingProcessingAlert = false
@@ -31,6 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         configureStatusItem()
         configurePopover()
         bindState()
+        bindPopoverContentSize()
         bindSilencePrompt()
         bindProcessingFailure()
     }
@@ -100,13 +102,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let popover = NSPopover()
         popover.behavior = .transient
         let hostingController = NSHostingController(
-            rootView: MenuBarRootView(controller: controller)
+            rootView: MenuBarRootView(
+                controller: controller,
+                onPreferredSizeChange: { [weak self] in
+                    Task { @MainActor [weak self] in
+                        self?.resizePopoverToFit()
+                    }
+                }
+            )
         )
-        hostingController.sizingOptions = [.preferredContentSize]
-        hostingController.view.layoutSubtreeIfNeeded()
+        // Explicitly control the popover size. Letting preferredContentSize update
+        // an NSPopover while it is transient/closed can temporarily set its height
+        // to zero as SwiftUI replaces state-dependent content.
+        hostingController.sizingOptions = []
         popover.contentViewController = hostingController
-        popover.contentSize = hostingController.view.fittingSize
+        self.popoverHostingController = hostingController
         self.popover = popover
+        resizePopoverToFit()
     }
 
     private func bindState() {
@@ -116,8 +128,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 self.handleStateTransition(to: state)
                 self.updateStatusItem(for: state)
+                if self.popover?.isShown == true {
+                    self.resizePopoverToFit()
+                }
             }
             .store(in: &cancellables)
+    }
+
+    private func bindPopoverContentSize() {
+        Publishers.Merge(
+            controller.$routeTransitionMessage.map { _ in () },
+            controller.$lastError.map { _ in () }
+        )
+        .receive(on: RunLoop.main)
+        .sink { [weak self] in
+            guard self?.popover?.isShown == true else { return }
+            self?.resizePopoverToFit()
+            DispatchQueue.main.async { [weak self] in
+                self?.resizePopoverToFit()
+            }
+        }
+        .store(in: &cancellables)
     }
 
     private func handleStateTransition(to state: AppState) {
@@ -266,6 +297,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem?.button?.image = NSImage(systemSymbolName: state.menuBarSymbolName, accessibilityDescription: state.title)
     }
 
+    private func resizePopoverToFit() {
+        guard let popover, let hostingController = popoverHostingController else {
+            return
+        }
+
+        hostingController.view.invalidateIntrinsicContentSize()
+        hostingController.view.needsLayout = true
+        hostingController.view.layoutSubtreeIfNeeded()
+        let fittingSize = hostingController.sizeThatFits(
+            in: NSSize(width: 460, height: CGFloat.greatestFiniteMagnitude)
+        )
+        let height = min(max(fittingSize.height, 220), 720)
+        popover.contentSize = NSSize(width: 460, height: height)
+    }
+
     @objc private func togglePopover() {
         guard let button = statusItem?.button, let popover else {
             return
@@ -274,7 +320,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if popover.isShown {
             popover.performClose(nil)
         } else {
+            resizePopoverToFit()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            // Re-measure after AppKit installs the hosting view in the popover
+            // window; its first off-window fitting size can be incomplete.
+            Task { @MainActor [weak self] in
+                self?.resizePopoverToFit()
+            }
             NSApp.activate(ignoringOtherApps: true)
         }
     }
