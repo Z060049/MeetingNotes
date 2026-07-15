@@ -64,10 +64,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func configureStatusItem() {
-        let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.target = self
         statusItem.button?.action = #selector(togglePopover)
-        statusItem.button?.imagePosition = .imageLeading
+        statusItem.button?.imagePosition = .imageOnly
         self.statusItem = statusItem
         updateStatusItem(for: controller.state)
     }
@@ -293,8 +293,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateStatusItem(for state: AppState) {
-        statusItem?.button?.title = " MeetingNotes: \(state.title)"
-        statusItem?.button?.image = NSImage(systemSymbolName: state.menuBarSymbolName, accessibilityDescription: state.title)
+        let label = "MeetingNotes: \(state.title)"
+        statusItem?.button?.title = ""
+        statusItem?.button?.toolTip = label
+        statusItem?.button?.image = NSImage(
+            systemSymbolName: state.menuBarSymbolName,
+            accessibilityDescription: label
+        )
     }
 
     private func resizePopoverToFit() {

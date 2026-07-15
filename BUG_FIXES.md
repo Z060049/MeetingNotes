@@ -95,6 +95,32 @@ Three issues combined:
 - Updated `buildPrompt` in `LocalSummarizationService.swift` to use `textForSummarization` and added an explicit rule: *"Write each keyPoint as a concise insight in your own words — do not copy transcript sentences verbatim."*
 - Updated `OpenAIProcessingProvider.swift` to use `textForSummarization` for consistency.
 
+## Open bug: Zoom cannot be used when MeetingNotes starts first
+
+### Symptoms
+
+- If MeetingNotes is started before Zoom, Zoom cannot be used normally.
+- Zoom works when it is opened first and MeetingNotes recording is started afterward.
+
+### Steps to reproduce
+
+1. Start MeetingNotes.
+2. Start recording in MeetingNotes.
+3. Open Zoom and attempt to start or join a meeting.
+4. Observe that Zoom cannot be used normally.
+
+### Expected behavior
+
+Zoom should open and work normally regardless of whether MeetingNotes is already running or recording.
+
+### Workaround
+
+Open Zoom first, then start recording in MeetingNotes.
+
+### Status
+
+Unresolved. The cause has not yet been investigated.
+
 ## Verification
 
 - Confirmed that audio remained available in Recording Recovery after terminating the stuck process.
