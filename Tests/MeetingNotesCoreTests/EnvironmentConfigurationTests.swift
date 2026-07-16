@@ -3,10 +3,10 @@ import XCTest
 
 final class EnvironmentConfigurationTests: XCTestCase {
     func testParsesSimpleAssignment() {
-        let contents = "OPENAI_API_KEY=sk-test-123"
+        let contents = "GROQ_API_KEY=gsk_test_123"
         XCTAssertEqual(
-            EnvironmentConfiguration.value(forKey: "OPENAI_API_KEY", inEnvFileContents: contents),
-            "sk-test-123"
+            EnvironmentConfiguration.value(forKey: "GROQ_API_KEY", inEnvFileContents: contents),
+            "gsk_test_123"
         )
     }
 
@@ -15,24 +15,45 @@ final class EnvironmentConfigurationTests: XCTestCase {
         # comment line
         OTHER_KEY=ignored
 
-        OPENAI_API_KEY=sk-real-key
+        GROQ_API_KEY=gsk_real_key
         """
         XCTAssertEqual(
-            EnvironmentConfiguration.value(forKey: "OPENAI_API_KEY", inEnvFileContents: contents),
-            "sk-real-key"
+            EnvironmentConfiguration.value(forKey: "GROQ_API_KEY", inEnvFileContents: contents),
+            "gsk_real_key"
         )
     }
 
     func testStripsSurroundingQuotesAndExportPrefix() {
-        let contents = "export OPENAI_API_KEY = \"sk-quoted-key\""
+        let contents = "export GROQ_API_KEY = \"gsk_quoted_key\""
         XCTAssertEqual(
-            EnvironmentConfiguration.value(forKey: "OPENAI_API_KEY", inEnvFileContents: contents),
-            "sk-quoted-key"
+            EnvironmentConfiguration.value(forKey: "GROQ_API_KEY", inEnvFileContents: contents),
+            "gsk_quoted_key"
         )
     }
 
     func testReturnsNilWhenKeyMissingOrEmpty() {
-        XCTAssertNil(EnvironmentConfiguration.value(forKey: "OPENAI_API_KEY", inEnvFileContents: "NOPE=1"))
-        XCTAssertNil(EnvironmentConfiguration.value(forKey: "OPENAI_API_KEY", inEnvFileContents: "OPENAI_API_KEY="))
+        XCTAssertNil(EnvironmentConfiguration.value(forKey: "GROQ_API_KEY", inEnvFileContents: "NOPE=1"))
+        XCTAssertNil(EnvironmentConfiguration.value(forKey: "GROQ_API_KEY", inEnvFileContents: "GROQ_API_KEY="))
     }
+
+    func testKeychainCredentialTakesPriority() {
+        XCTAssertEqual(
+            EnvironmentConfiguration.groqAPIKey(
+                credentialStore: StubCredentialStore(apiKey: "gsk_keychain")
+            ),
+            "gsk_keychain"
+        )
+    }
+}
+
+private struct StubCredentialStore: APICredentialStoring {
+    let apiKeyValue: String?
+
+    init(apiKey: String?) {
+        apiKeyValue = apiKey
+    }
+
+    func apiKey() throws -> String? { apiKeyValue }
+    func saveAPIKey(_ apiKey: String) throws {}
+    func deleteAPIKey() throws {}
 }

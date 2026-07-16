@@ -12,6 +12,8 @@ struct SettingsView: View {
     @State private var statusMessage: String?
     @State private var whisperError: String?
     @State private var mlxError: String?
+    @State private var groqAPIKey = ""
+    @State private var groqKeyError: String?
 
     init(
         controller: MeetingNotesController,
@@ -20,9 +22,7 @@ struct SettingsView: View {
         self.controller = controller
         self.localModelManager = controller.localModelManager
         self.onOpenOnboarding = onOpenOnboarding
-        var visibleSettings = controller.settings
-        visibleSettings.processingMode = .local
-        _settings = State(initialValue: visibleSettings)
+        _settings = State(initialValue: controller.settings)
     }
 
     var body: some View {
@@ -31,10 +31,19 @@ struct SettingsView: View {
                 .font(.title2)
                 .bold()
 
-            // MARK: Local processing
-            GroupBox("Local Processing") {
+            GroupBox("Processing") {
                 VStack(alignment: .leading, spacing: 10) {
-                    localModeSection
+                    Picker("Mode", selection: $settings.processingMode) {
+                        Text("Groq API (Recommended)").tag(ProcessingMode.api)
+                        Text("Local").tag(ProcessingMode.local)
+                    }
+                    .pickerStyle(.segmented)
+
+                    if settings.processingMode == .local {
+                        localModeSection
+                    } else {
+                        groqModeSection
+                    }
                 }
                 .padding(4)
             }
@@ -142,6 +151,55 @@ struct SettingsView: View {
 
             // Whisper model picker + download
             whisperModelRow
+        }
+    }
+
+    private var groqModeSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Groq processes audio and transcript text in the cloud. Its free tier is rate-limited.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if controller.hasGroqAPIKey {
+                HStack {
+                    Label("API key saved in Keychain", systemImage: "checkmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                    Spacer()
+                    Button("Remove") {
+                        do {
+                            try controller.deleteGroqAPIKey()
+                            groqKeyError = nil
+                        } catch {
+                            groqKeyError = error.localizedDescription
+                        }
+                    }
+                }
+            } else {
+                HStack {
+                    SecureField("Paste GROQ_API_KEY", text: $groqAPIKey)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Save Key") {
+                        do {
+                            try controller.saveGroqAPIKey(groqAPIKey)
+                            groqAPIKey = ""
+                            groqKeyError = nil
+                        } catch {
+                            groqKeyError = error.localizedDescription
+                        }
+                    }
+                    .disabled(groqAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+
+            Link("Create a Groq API key", destination: URL(string: "https://console.groq.com/keys")!)
+                .font(.caption)
+
+            if let groqKeyError {
+                Text(groqKeyError)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
         }
     }
 
@@ -335,6 +393,7 @@ struct SettingsView: View {
     }
 
     private func save() {
+        settings.hasSelectedProcessingMode = true
         controller.updateSettings(settings)
         statusMessage = "Settings saved."
         dismiss()

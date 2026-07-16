@@ -21,7 +21,7 @@ import Foundation
 /// A mic segment with *no* system-audio segment nearby in time is guaranteed to
 /// be genuine speech and is kept unconditionally.
 ///
-/// **Text-only path** (API / OpenAI Whisper, no timestamps):
+/// **Text-only path** (API transcription without timestamps):
 /// Falls back to the original sentence-level Jaccard + Levenshtein + bigram
 /// coverage approach when no timing data is present.
 public enum TranscriptDeduplicator {

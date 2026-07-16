@@ -1,6 +1,8 @@
 import Foundation
 
-public final class OpenAIProcessingProvider: ProcessingProvider, @unchecked Sendable {
+public final class GroqProcessingProvider: ProcessingProvider, @unchecked Sendable {
+    private static let baseURL = "https://api.groq.com/openai/v1"
+
     private let apiKeyProvider: @Sendable () throws -> String?
     private let session: URLSession
     private let transcriptionModel: String
@@ -9,8 +11,8 @@ public final class OpenAIProcessingProvider: ProcessingProvider, @unchecked Send
     public init(
         apiKeyProvider: @escaping @Sendable () throws -> String?,
         session: URLSession = .shared,
-        transcriptionModel: String = "whisper-1",
-        summaryModel: String = "gpt-4o-mini"
+        transcriptionModel: String = "whisper-large-v3-turbo",
+        summaryModel: String = "openai/gpt-oss-20b"
     ) {
         self.apiKeyProvider = apiKeyProvider
         self.session = session
@@ -26,7 +28,6 @@ public final class OpenAIProcessingProvider: ProcessingProvider, @unchecked Send
         guard settings.processingMode == .api else {
             throw ProcessingProviderError.unsupportedLocalMode
         }
-
         guard let apiKey = try apiKeyProvider(), !apiKey.isEmpty else {
             throw ProcessingProviderError.missingAPIKey
         }
@@ -49,32 +50,30 @@ public final class OpenAIProcessingProvider: ProcessingProvider, @unchecked Send
         return ProcessingResult(transcript: cleaned, summary: summary)
     }
 
-    /// Generates a short title (4–6 words) for use in filenames via a minimal API call.
-    /// Never throws — returns "recording" on failure.
     public func generateTitle(transcript: Transcript, apiKey: String) async -> String {
-        var request = URLRequest(url: URL(string: "https://api.openai.com/v1/responses")!)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let messages = [
+            ChatMessage(
+                role: "user",
+                content: """
+                Reply with only a title of 4-6 words for this conversation. \
+                Use plain words, no punctuation, no quotes.
 
-        let payload: [String: Any] = [
-            "model": summaryModel,
-            "input": """
-            Reply with only a title of 4-6 words for this conversation. \
-            Use plain words, no punctuation, no quotes.
-
-            Transcript:
-            \(transcript.textForSummarization.prefix(400))
-            """,
-            "max_output_tokens": 40
+                Transcript:
+                \(transcript.textForSummarization.prefix(400))
+                """
+            )
         ]
 
-        guard let body = try? JSONSerialization.data(withJSONObject: payload) else { return "recording" }
-        request.httpBody = body
-
         do {
-            let (data, _) = try await session.data(for: request)
-            guard let text = try? ResponsesAPITextExtractor.extractText(from: data) else { return "recording" }
+            let data = try await chatCompletion(
+                messages: messages,
+                apiKey: apiKey,
+                responseFormat: nil,
+                maxCompletionTokens: 40
+            )
+            guard let text = try ChatCompletionTextExtractor.extractText(from: data) else {
+                return "recording"
+            }
             return sanitizeTitle(text)
         } catch {
             return "recording"
@@ -102,8 +101,6 @@ public final class OpenAIProcessingProvider: ProcessingProvider, @unchecked Send
                 continue
             }
 
-            // Fall back to the original file when no active frames are found above
-            // threshold — skipping outright was too aggressive for quiet mics.
             let trimmedAudio = try? AudioLevelAnalyzer.trimmedSilence(url: file.url)
             let uploadURL = trimmedAudio?.url ?? file.url
             let timelineOffset = file.captureStartOffset + (trimmedAudio?.startOffset ?? 0)
@@ -126,7 +123,7 @@ public final class OpenAIProcessingProvider: ProcessingProvider, @unchecked Send
 
     private func transcribe(fileURL: URL, apiKey: String) async throws -> TranscriptionResponse {
         let boundary = "Boundary-\(UUID().uuidString)"
-        var request = URLRequest(url: URL(string: "https://api.openai.com/v1/audio/transcriptions")!)
+        var request = URLRequest(url: URL(string: "\(Self.baseURL)/audio/transcriptions")!)
         request.httpMethod = "POST"
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
@@ -156,56 +153,77 @@ public final class OpenAIProcessingProvider: ProcessingProvider, @unchecked Send
     }
 
     private func summarize(transcript: Transcript, depth: SummaryDepth, apiKey: String) async throws -> MeetingSummary {
-        var request = URLRequest(url: URL(string: "https://api.openai.com/v1/responses")!)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let messages = [
+            ChatMessage(
+                role: "user",
+                content: """
+                Create a \(depth.rawValue) meeting summary from this transcript.
+                Write each keyPoint as a concise insight in your own words; do not copy transcript sentences verbatim.
 
-        let payload = SummaryRequest(
-            model: summaryModel,
-            input: """
-            Create a \(depth.rawValue) meeting summary from this transcript.
-            Return only JSON matching the requested schema. Do not wrap the JSON in markdown.
-            Write each keyPoint as a concise insight in your own words — do not copy transcript sentences verbatim.
-
-            Transcript:
-            \(transcript.textForSummarization)
-            """,
-            text: SummaryTextOptions(
-                format: SummaryJSONSchema(
-                    type: "json_schema",
-                    name: "meeting_summary",
-                    strict: true,
-                    schema: SummarySchema.object
-                )
+                Transcript:
+                \(transcript.textForSummarization)
+                """
+            )
+        ]
+        let responseFormat = ChatResponseFormat(
+            type: "json_schema",
+            jsonSchema: ChatJSONSchema(
+                name: "meeting_summary",
+                strict: true,
+                schema: SummarySchema.object
             )
         )
+        let data = try await chatCompletion(
+            messages: messages,
+            apiKey: apiKey,
+            responseFormat: responseFormat,
+            maxCompletionTokens: 2_048
+        )
 
-        request.httpBody = try JSONEncoder().encode(payload)
-        let (data, response) = try await session.data(for: request)
-        try validate(response: response, data: data)
-
-        guard let text = try ResponsesAPITextExtractor.extractText(from: data) else {
-            throw ProcessingProviderError.apiError("OpenAI summary response did not contain output text.")
+        guard let text = try ChatCompletionTextExtractor.extractText(from: data) else {
+            throw ProcessingProviderError.apiError("Groq summary response did not contain output text.")
         }
-
-        let cleanedText = Self.cleanJSONText(text)
-        guard let jsonData = cleanedText.data(using: .utf8) else {
+        guard let jsonData = text.data(using: .utf8) else {
             throw ProcessingProviderError.invalidResponse
         }
 
         do {
             return try JSONDecoder().decode(MeetingSummary.self, from: jsonData)
         } catch {
-            throw ProcessingProviderError.apiError("OpenAI summary response was not valid meeting-summary JSON: \(error.localizedDescription)")
+            throw ProcessingProviderError.apiError(
+                "Groq summary response was not valid meeting-summary JSON: \(error.localizedDescription)"
+            )
         }
+    }
+
+    private func chatCompletion(
+        messages: [ChatMessage],
+        apiKey: String,
+        responseFormat: ChatResponseFormat?,
+        maxCompletionTokens: Int
+    ) async throws -> Data {
+        var request = URLRequest(url: URL(string: "\(Self.baseURL)/chat/completions")!)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(
+            ChatCompletionRequest(
+                model: summaryModel,
+                messages: messages,
+                responseFormat: responseFormat,
+                maxCompletionTokens: maxCompletionTokens
+            )
+        )
+
+        let (data, response) = try await session.data(for: request)
+        try validate(response: response, data: data)
+        return data
     }
 
     private func validate(response: URLResponse, data: Data) throws {
         guard let httpResponse = response as? HTTPURLResponse else {
             throw ProcessingProviderError.invalidResponse
         }
-
         guard (200..<300).contains(httpResponse.statusCode) else {
             throw Self.processingError(statusCode: httpResponse.statusCode, responseBody: data)
         }
@@ -213,15 +231,22 @@ public final class OpenAIProcessingProvider: ProcessingProvider, @unchecked Send
 
     public static func processingError(statusCode: Int, responseBody: Data) -> ProcessingProviderError {
         let parsed = parseErrorBody(responseBody)
-        let rawFallback = String(data: responseBody, encoding: .utf8) ?? "OpenAI request failed."
+        let rawFallback = String(data: responseBody, encoding: .utf8) ?? "Groq request failed."
 
-        let isQuota = statusCode == 429
-            && (parsed?.type == "insufficient_quota" || parsed?.code == "insufficient_quota")
-        if isQuota {
-            return .quotaExceeded("OpenAI reports your account is out of credits/quota. Add credits to your OpenAI account and try again.")
+        switch statusCode {
+        case 401, 403:
+            return .apiError("Groq rejected the API key. Update it in MeetingNotes Settings and try again.")
+        case 429:
+            return .quotaExceeded(
+                parsed?.message ?? "Groq's rate limit was reached. Wait for the free-tier limit to reset and try again."
+            )
+        default:
+            return .apiError(parsed?.message ?? rawFallback)
         }
+    }
 
-        return .apiError(parsed?.message ?? rawFallback)
+    static func decodeChatCompletionText(from data: Data) throws -> String? {
+        try ChatCompletionTextExtractor.extractText(from: data)
     }
 
     static func decodeTranscriptionSegments(
@@ -303,20 +328,6 @@ public final class OpenAIProcessingProvider: ProcessingProvider, @unchecked Send
         try write("\r\n--\(boundary)--\r\n")
         return tempURL
     }
-
-    private static func cleanJSONText(_ text: String) -> String {
-        var cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if cleaned.hasPrefix("```") {
-            cleaned = cleaned
-                .replacingOccurrences(of: "```json", with: "")
-                .replacingOccurrences(of: "```JSON", with: "")
-                .replacingOccurrences(of: "```", with: "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        return cleaned
-    }
 }
 
 private struct TranscriptionResponse: Decodable {
@@ -330,18 +341,36 @@ private struct TranscriptionSegmentResponse: Decodable {
     let text: String
 }
 
-private struct SummaryRequest: Encodable {
+private struct ChatMessage: Codable {
+    let role: String
+    let content: String
+}
+
+private struct ChatCompletionRequest: Encodable {
     let model: String
-    let input: String
-    let text: SummaryTextOptions
+    let messages: [ChatMessage]
+    let responseFormat: ChatResponseFormat?
+    let maxCompletionTokens: Int
+
+    enum CodingKeys: String, CodingKey {
+        case model
+        case messages
+        case responseFormat = "response_format"
+        case maxCompletionTokens = "max_completion_tokens"
+    }
 }
 
-private struct SummaryTextOptions: Encodable {
-    let format: SummaryJSONSchema
-}
-
-private struct SummaryJSONSchema: Encodable {
+private struct ChatResponseFormat: Encodable {
     let type: String
+    let jsonSchema: ChatJSONSchema
+
+    enum CodingKeys: String, CodingKey {
+        case type
+        case jsonSchema = "json_schema"
+    }
+}
+
+private struct ChatJSONSchema: Encodable {
     let name: String
     let strict: Bool
     let schema: SummarySchema
@@ -358,11 +387,11 @@ private struct SummarySchema: Encodable {
         additionalProperties: false,
         required: ["title", "keyPoints", "decisions", "actionItems", "followUps"],
         properties: [
-            "title": SummarySchemaProperty.string,
-            "keyPoints": SummarySchemaProperty.stringArray,
-            "decisions": SummarySchemaProperty.stringArray,
-            "actionItems": SummarySchemaProperty.stringArray,
-            "followUps": SummarySchemaProperty.stringArray
+            "title": .string,
+            "keyPoints": .stringArray,
+            "decisions": .stringArray,
+            "actionItems": .stringArray,
+            "followUps": .stringArray
         ]
     )
 }
@@ -392,37 +421,15 @@ private struct StringItemSchema: Encodable {
     let type: String
 }
 
-private struct ResponsesAPITextExtractor {
+private struct ChatCompletionTextExtractor {
     static func extractText(from data: Data) throws -> String? {
         let object = try JSONSerialization.jsonObject(with: data)
-        guard let dictionary = object as? [String: Any] else {
+        guard let dictionary = object as? [String: Any],
+              let choices = dictionary["choices"] as? [[String: Any]],
+              let message = choices.first?["message"] as? [String: Any],
+              let content = message["content"] as? String else {
             return nil
         }
-
-        if let outputText = dictionary["output_text"] as? String {
-            return outputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        guard let output = dictionary["output"] as? [[String: Any]] else {
-            return nil
-        }
-
-        for item in output {
-            guard let content = item["content"] as? [[String: Any]] else {
-                continue
-            }
-
-            for contentItem in content {
-                if let text = contentItem["text"] as? String {
-                    return text.trimmingCharacters(in: .whitespacesAndNewlines)
-                }
-                if let text = contentItem["output_text"] as? String {
-                    return text.trimmingCharacters(in: .whitespacesAndNewlines)
-                }
-            }
-        }
-
-        return nil
+        return content.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
-

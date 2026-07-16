@@ -27,7 +27,7 @@ public enum ProcessingProviderError: Error, LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .missingAPIKey:
-            "Set OPENAI_API_KEY in a .env file (project root or ~/Documents/MeetingNotes/.env) before processing recordings."
+            "Add your Groq API key in MeetingNotes Settings before processing recordings."
         case .unsupportedLocalMode:
             "Local processing is planned after the API-first MVP."
         case .invalidResponse:

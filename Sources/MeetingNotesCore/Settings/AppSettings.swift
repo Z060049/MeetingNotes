@@ -34,6 +34,7 @@ public struct AppSettings: Equatable, Sendable {
     public var shouldShowConsentReminder: Bool
     public var hasAcceptedConsentChecklist: Bool
     public var hasCompletedOnboarding: Bool
+    public var hasSelectedProcessingMode: Bool
     public var hasRequestedScreenCapturePermission: Bool
     public var isAwaitingScreenCaptureRelaunch: Bool
     public var whisperModel: WhisperModelSize
@@ -47,6 +48,7 @@ public struct AppSettings: Equatable, Sendable {
         shouldShowConsentReminder: Bool = true,
         hasAcceptedConsentChecklist: Bool = false,
         hasCompletedOnboarding: Bool = false,
+        hasSelectedProcessingMode: Bool = false,
         hasRequestedScreenCapturePermission: Bool = false,
         isAwaitingScreenCaptureRelaunch: Bool = false,
         whisperModel: WhisperModelSize = .baseEn,
@@ -59,6 +61,7 @@ public struct AppSettings: Equatable, Sendable {
         self.shouldShowConsentReminder = shouldShowConsentReminder
         self.hasAcceptedConsentChecklist = hasAcceptedConsentChecklist
         self.hasCompletedOnboarding = hasCompletedOnboarding
+        self.hasSelectedProcessingMode = hasSelectedProcessingMode
         self.hasRequestedScreenCapturePermission = hasRequestedScreenCapturePermission
         self.isAwaitingScreenCaptureRelaunch = isAwaitingScreenCaptureRelaunch
         self.whisperModel = whisperModel
@@ -75,6 +78,7 @@ public final class SettingsStore: @unchecked Sendable {
         static let shouldShowConsentReminder = "shouldShowConsentReminder"
         static let hasAcceptedConsentChecklist = "hasAcceptedConsentChecklist"
         static let hasCompletedOnboarding = "hasCompletedOnboarding"
+        static let hasSelectedProcessingMode = "hasSelectedProcessingMode"
         static let hasRequestedScreenCapturePermission = "hasRequestedScreenCapturePermission"
         static let isAwaitingScreenCaptureRelaunch = "isAwaitingScreenCaptureRelaunch"
         static let whisperModel = "whisperModel"
@@ -115,6 +119,13 @@ public final class SettingsStore: @unchecked Sendable {
 
         settings.hasAcceptedConsentChecklist = defaults.bool(forKey: Key.hasAcceptedConsentChecklist)
         settings.hasCompletedOnboarding = defaults.bool(forKey: Key.hasCompletedOnboarding)
+        if defaults.object(forKey: Key.hasSelectedProcessingMode) != nil {
+            settings.hasSelectedProcessingMode = defaults.bool(forKey: Key.hasSelectedProcessingMode)
+        } else if settings.hasCompletedOnboarding {
+            // Existing installs completed onboarding before processing selection
+            // was introduced. Preserve their setup and persisted mode.
+            settings.hasSelectedProcessingMode = true
+        }
         settings.hasRequestedScreenCapturePermission = defaults.bool(
             forKey: Key.hasRequestedScreenCapturePermission
         )
@@ -142,6 +153,7 @@ public final class SettingsStore: @unchecked Sendable {
         defaults.set(settings.shouldShowConsentReminder, forKey: Key.shouldShowConsentReminder)
         defaults.set(settings.hasAcceptedConsentChecklist, forKey: Key.hasAcceptedConsentChecklist)
         defaults.set(settings.hasCompletedOnboarding, forKey: Key.hasCompletedOnboarding)
+        defaults.set(settings.hasSelectedProcessingMode, forKey: Key.hasSelectedProcessingMode)
         defaults.set(
             settings.hasRequestedScreenCapturePermission,
             forKey: Key.hasRequestedScreenCapturePermission

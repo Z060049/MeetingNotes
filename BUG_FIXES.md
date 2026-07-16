@@ -93,7 +93,7 @@ Three issues combined:
 
 - Added `textForSummarization` to `Transcript` (`TranscriptModels.swift`). It merges all segments into clean prose, stripping speaker labels, `>>` prefixes, and `[silence]` filler tokens before the text is sent to any LLM.
 - Updated `buildPrompt` in `LocalSummarizationService.swift` to use `textForSummarization` and added an explicit rule: *"Write each keyPoint as a concise insight in your own words — do not copy transcript sentences verbatim."*
-- Updated `OpenAIProcessingProvider.swift` to use `textForSummarization` for consistency.
+- Updated the API processing provider to use `textForSummarization` for consistency.
 
 ## Zoom cannot be used when MeetingNotes starts first
 

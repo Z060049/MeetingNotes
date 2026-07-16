@@ -12,6 +12,7 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertTrue(settings.shouldShowConsentReminder)
         XCTAssertFalse(settings.hasAcceptedConsentChecklist)
         XCTAssertFalse(settings.hasCompletedOnboarding)
+        XCTAssertFalse(settings.hasSelectedProcessingMode)
         XCTAssertFalse(settings.hasRequestedScreenCapturePermission)
         XCTAssertFalse(settings.isAwaitingScreenCaptureRelaunch)
     }
@@ -30,6 +31,7 @@ final class SettingsStoreTests: XCTestCase {
             shouldShowConsentReminder: false,
             hasAcceptedConsentChecklist: true,
             hasCompletedOnboarding: true,
+            hasSelectedProcessingMode: true,
             hasRequestedScreenCapturePermission: true,
             isAwaitingScreenCaptureRelaunch: true
         )
@@ -37,5 +39,18 @@ final class SettingsStoreTests: XCTestCase {
         store.save(expected)
 
         XCTAssertEqual(store.load(), expected)
+    }
+
+    func testExistingCompletedInstallMigratesProcessingSelection() {
+        let suiteName = "MeetingNotesMigrationTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(true, forKey: "hasCompletedOnboarding")
+        defaults.set(ProcessingMode.api.rawValue, forKey: "processingMode")
+
+        let settings = SettingsStore(defaults: defaults).load()
+
+        XCTAssertTrue(settings.hasSelectedProcessingMode)
+        XCTAssertEqual(settings.processingMode, .api)
     }
 }

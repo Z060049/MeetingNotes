@@ -15,16 +15,16 @@ Copy this template for each validation pass. Use `docs/MVP_VALIDATION_CHECKLIST.
 - Audio output route:
 - Headphones/speakers/Bluetooth:
 - Output folder:
-- OpenAI API mode enabled: Yes/No
-- OpenAI models observed/configured:
+- Processing mode: Local/Groq API
+- Local models downloaded, if selected:
+- Groq API key stored in Keychain, if selected: Yes/No
+- Groq models observed/configured:
 
 ## Permission Status
 
 - Consent checklist accepted: Yes/No
 - Microphone permission granted: Yes/No
-- System Audio Recording Only permission granted: Yes/No
-- Screen & System Audio Recording permission granted, if fallback needed: Yes/No/Not Needed
-- Accessibility permission trusted: Yes/No
+- Screen & System Audio Recording permission granted: Yes/No
 - Keychain prompt shown: Yes/No
 - Notes:
 

@@ -108,7 +108,9 @@ On first launch, grant the following permissions when prompted:
 | Microphone | Capture your voice |
 | Screen & System Audio Recording | Capture audio from Zoom, Meet, Teams, or any other app |
 
-MeetingNotes opens a guided setup window on first launch. Enable Microphone access first, then enable MeetingNotes under **System Settings → Privacy & Security → Screen & System Audio Recording**. macOS requires MeetingNotes to restart after the second permission is enabled; the setup window provides a restart button and verifies access on the next launch.
+MeetingNotes opens a guided setup window on first launch. Choose **Groq API (Recommended)** for fast cloud processing, or **Local** to process privately on your Mac. Groq API setup includes a link to create a key and stores your `GROQ_API_KEY` securely in macOS Keychain; Groq offers a rate-limited free tier. Local setup downloads the selected Whisper model and, when needed, the MLX summary model before setup can continue.
+
+Enable Microphone access, then enable MeetingNotes under **System Settings → Privacy & Security → Screen & System Audio Recording**. macOS requires MeetingNotes to restart after the second permission is enabled; the setup window provides a restart button and verifies access on the next launch.
 
 Only these two permissions are required. MeetingNotes does not request Camera, Accessibility, or System Audio Recording Only access.
 
@@ -118,9 +120,11 @@ Recording is started and stopped from the menu bar.
 
 | Setting | Default |
 |---|---|
+| Processing mode | Groq API (Recommended) |
 | Summary depth | Standard |
-| Language model | Qwen 2.5 0.5B (optional download) |
-| Inactivity timeout | 300 seconds |
+| Speech model | Whisper Base English (~74 MB, required download) |
+| Language model | Qwen 2.5 0.5B (~300 MB when MLX is required) |
+| Inactivity timeout | 180 seconds |
 | Output folder | `~/Documents/MeetingNotes/` |
 | Consent reminder | On |
 

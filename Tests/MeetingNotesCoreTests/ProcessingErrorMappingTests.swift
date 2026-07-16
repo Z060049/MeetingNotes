@@ -2,12 +2,12 @@ import MeetingNotesCore
 import XCTest
 
 final class ProcessingErrorMappingTests: XCTestCase {
-    func testMapsInsufficientQuotaToQuotaExceeded() {
+    func testMapsRateLimitToQuotaExceeded() {
         let body = Data("""
         {"error":{"message":"You exceeded your current quota, please check your plan and billing details.","type":"insufficient_quota","code":"insufficient_quota"}}
         """.utf8)
 
-        let error = OpenAIProcessingProvider.processingError(statusCode: 429, responseBody: body)
+        let error = GroqProcessingProvider.processingError(statusCode: 429, responseBody: body)
 
         guard case .quotaExceeded(let message) = error else {
             return XCTFail("expected quotaExceeded, got \(error)")
@@ -20,7 +20,7 @@ final class ProcessingErrorMappingTests: XCTestCase {
         {"error":{"message":"Invalid request payload.","type":"invalid_request_error"}}
         """.utf8)
 
-        let error = OpenAIProcessingProvider.processingError(statusCode: 400, responseBody: body)
+        let error = GroqProcessingProvider.processingError(statusCode: 400, responseBody: body)
 
         guard case .apiError(let message) = error else {
             return XCTFail("expected apiError, got \(error)")
@@ -31,7 +31,7 @@ final class ProcessingErrorMappingTests: XCTestCase {
     func testNonJSONBodyFallsBackToRawText() {
         let body = Data("Service Unavailable".utf8)
 
-        let error = OpenAIProcessingProvider.processingError(statusCode: 503, responseBody: body)
+        let error = GroqProcessingProvider.processingError(statusCode: 503, responseBody: body)
 
         guard case .apiError(let message) = error else {
             return XCTFail("expected apiError, got \(error)")
@@ -39,15 +39,12 @@ final class ProcessingErrorMappingTests: XCTestCase {
         XCTAssertEqual(message, "Service Unavailable")
     }
 
-    func testRateLimitWithoutQuotaIsNotQuotaExceeded() {
-        let body = Data("""
-        {"error":{"message":"Rate limit reached for requests.","type":"requests","code":"rate_limit_exceeded"}}
-        """.utf8)
+    func testMapsRejectedKeyToActionableMessage() {
+        let error = GroqProcessingProvider.processingError(statusCode: 401, responseBody: Data())
 
-        let error = OpenAIProcessingProvider.processingError(statusCode: 429, responseBody: body)
-
-        guard case .apiError = error else {
+        guard case .apiError(let message) = error else {
             return XCTFail("expected apiError, got \(error)")
         }
+        XCTAssertTrue(message.contains("API key"))
     }
 }

@@ -17,14 +17,16 @@ Use this checklist for every manual MVP validation pass. Record results in `docs
   ```
 
 - [ ] Confirm `MeetingNotes` appears in the menu bar.
-- [ ] Open MeetingNotes settings and confirm the OpenAI API key is saved.
+- [ ] Confirm onboarding defaults to Groq API (Recommended), links to Groq key creation, and offers Local as the alternative.
+- [ ] For Local, confirm required model downloads complete before Continue is enabled.
+- [ ] For Groq API, confirm a `GROQ_API_KEY` can be saved to macOS Keychain and no OpenAI key is requested.
 - [ ] Confirm output folder is set, usually `~/Documents/MeetingNotes/`.
 - [ ] Confirm the first-launch onboarding window opens automatically.
 - [ ] Confirm microphone permission is granted from the onboarding flow.
 - [ ] Confirm Screen & System Audio Recording permission is enabled for `MeetingNotes`; ScreenCaptureKit is the only automatic system-audio backend.
 - [ ] Confirm onboarding requires a restart after system-audio access is requested.
-- [ ] Confirm the restarted app verifies both permissions and reaches the Ready screen.
-- [ ] Confirm recording is blocked with a Finish Setup action if either permission is revoked.
+- [ ] Confirm the restarted app verifies processing setup and both permissions, then reaches the Ready screen.
+- [ ] Confirm recording is blocked with a Finish Setup action if a required model/key or either permission is missing.
 - [ ] No camera or Accessibility permission is required for audio capture.
 - [ ] Confirm the Debug section is visible and diagnostics can be copied.
 - [ ] Clear diagnostics before each scenario unless the test requires preserving prior state.

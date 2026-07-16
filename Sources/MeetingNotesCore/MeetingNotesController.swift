@@ -31,6 +31,7 @@ public final class MeetingNotesController: ObservableObject {
 
     private let settingsStore: SettingsStore
     private let permissionService: PermissionServicing
+    private let credentialStore: APICredentialStoring
     private let audioCaptureService: DualAudioCaptureService
     private let markdownExporter: MarkdownExporter
     private var processingProvider: ProcessingProvider
@@ -44,12 +45,14 @@ public final class MeetingNotesController: ObservableObject {
     public init(
         settingsStore: SettingsStore = SettingsStore(),
         permissionService: PermissionServicing = SystemPermissionService(),
+        credentialStore: APICredentialStoring = KeychainAPICredentialStore(),
         audioCaptureService: DualAudioCaptureService = DualAudioCaptureService(),
         markdownExporter: MarkdownExporter = MarkdownExporter(),
         processingProvider: ProcessingProvider? = nil
     ) {
         self.settingsStore = settingsStore
         self.permissionService = permissionService
+        self.credentialStore = credentialStore
         self.audioCaptureService = audioCaptureService
         self.markdownExporter = markdownExporter
         var loadedSettings = settingsStore.load()
@@ -69,7 +72,8 @@ public final class MeetingNotesController: ObservableObject {
         self.localModelManager = manager
         self.processingProvider = processingProvider ?? Self.makeProvider(
             for: loadedSettings,
-            localModelManager: manager
+            localModelManager: manager,
+            credentialStore: credentialStore
         )
         audioCaptureService.onRouteTransition = { [weak self] status in
             Task { @MainActor in
@@ -86,7 +90,28 @@ public final class MeetingNotesController: ObservableObject {
     public var isSetupComplete: Bool {
         settings.hasAcceptedConsentChecklist
             && settings.hasCompletedOnboarding
+            && settings.hasSelectedProcessingMode
             && permissionSnapshot.isReady
+            && isProcessingSetupReady
+    }
+
+    public var isProcessingSetupReady: Bool {
+        switch settings.processingMode {
+        case .api:
+            guard let key = EnvironmentConfiguration.groqAPIKey(credentialStore: credentialStore) else {
+                return false
+            }
+            return !key.isEmpty
+        case .local:
+            return localModelManager.isReadyToProcess(settings: settings)
+        }
+    }
+
+    public var hasGroqAPIKey: Bool {
+        guard let key = EnvironmentConfiguration.groqAPIKey(credentialStore: credentialStore) else {
+            return false
+        }
+        return !key.isEmpty
     }
 
     @MainActor private func handleRouteTransition(
@@ -112,11 +137,14 @@ public final class MeetingNotesController: ObservableObject {
 
     private static func makeProvider(
         for settings: AppSettings,
-        localModelManager: LocalModelManager
+        localModelManager: LocalModelManager,
+        credentialStore: APICredentialStoring
     ) -> ProcessingProvider {
         switch settings.processingMode {
         case .api:
-            return OpenAIProcessingProvider { EnvironmentConfiguration.openAIAPIKey() }
+            return GroqProcessingProvider {
+                EnvironmentConfiguration.groqAPIKey(credentialStore: credentialStore)
+            }
         case .local:
             return LocalProcessingProvider(
                 transcriptionService: localModelManager.transcriptionService,
@@ -132,7 +160,11 @@ public final class MeetingNotesController: ObservableObject {
         self.settings = settings
         settingsStore.save(settings)
         if settings.processingMode != previousMode {
-            processingProvider = Self.makeProvider(for: settings, localModelManager: localModelManager)
+            processingProvider = Self.makeProvider(
+                for: settings,
+                localModelManager: localModelManager,
+                credentialStore: credentialStore
+            )
             addDiagnostic("Processing provider switched to \(settings.processingMode.rawValue) mode.")
         }
         addDiagnostic("Settings saved. Timeout: \(Int(settings.inactivityTimeoutSeconds))s, output: \(settings.outputDirectory.path)")
@@ -143,6 +175,26 @@ public final class MeetingNotesController: ObservableObject {
         updated.hasAcceptedConsentChecklist = true
         updateSettings(updated)
         addDiagnostic("Consent checklist accepted.")
+    }
+
+    @MainActor public func selectProcessingMode(_ mode: ProcessingMode) {
+        var updated = settings
+        updated.processingMode = mode
+        updated.hasSelectedProcessingMode = true
+        updated.hasCompletedOnboarding = false
+        updateSettings(updated)
+    }
+
+    @MainActor public func saveGroqAPIKey(_ apiKey: String) throws {
+        try credentialStore.saveAPIKey(apiKey)
+        objectWillChange.send()
+        addDiagnostic("Groq API key saved securely in Keychain.")
+    }
+
+    @MainActor public func deleteGroqAPIKey() throws {
+        try credentialStore.deleteAPIKey()
+        objectWillChange.send()
+        addDiagnostic("Groq API key removed from Keychain.")
     }
 
     @MainActor public func refreshPermissionStatus() {
@@ -182,8 +234,11 @@ public final class MeetingNotesController: ObservableObject {
 
     @MainActor public func completeOnboarding() {
         refreshPermissionStatus()
-        guard settings.hasAcceptedConsentChecklist, permissionSnapshot.isReady else {
-            addDiagnostic("Onboarding completion blocked because permissions are incomplete.", level: .warning)
+        guard settings.hasAcceptedConsentChecklist,
+              settings.hasSelectedProcessingMode,
+              permissionSnapshot.isReady,
+              isProcessingSetupReady else {
+            addDiagnostic("Onboarding completion blocked because setup is incomplete.", level: .warning)
             return
         }
         var updated = settings
@@ -210,8 +265,14 @@ public final class MeetingNotesController: ObservableObject {
 
         refreshPermissionStatus()
         guard isSetupComplete else {
-            lastError = "Finish setup and grant Microphone and Screen & System Audio Recording access before starting."
-            addDiagnostic(lastError ?? "Permission setup required.", level: .warning)
+            if !isProcessingSetupReady {
+                lastError = settings.processingMode == .api
+                    ? "Add your Groq API key before recording."
+                    : "Download the required local models before recording."
+            } else {
+                lastError = "Finish setup and grant Microphone and Screen & System Audio Recording access before starting."
+            }
+            addDiagnostic(lastError ?? "Setup required.", level: .warning)
             onboardingRequested.send()
             return
         }
@@ -324,8 +385,9 @@ public final class MeetingNotesController: ObservableObject {
                     mlxModelID: currentSettings.localLLMModel
                 )
             case .api:
-                if let apiKey = EnvironmentConfiguration.openAIAPIKey(), !apiKey.isEmpty {
-                    let provider = OpenAIProcessingProvider { apiKey }
+                if let apiKey = EnvironmentConfiguration.groqAPIKey(credentialStore: self.credentialStore),
+                   !apiKey.isEmpty {
+                    let provider = GroqProcessingProvider { apiKey }
                     shortTitle = await provider.generateTitle(transcript: transcript, apiKey: apiKey)
                 } else {
                     shortTitle = "recording"

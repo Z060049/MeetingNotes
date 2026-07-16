@@ -3,6 +3,7 @@ import Foundation
 public enum OnboardingStep: Int, CaseIterable, Equatable, Sendable {
     case welcome
     case consent
+    case processing
     case microphone
     case systemAudio
     case restart
@@ -14,12 +15,15 @@ public struct OnboardingFlowState: Equatable, Sendable {
 
     public init(
         settings: AppSettings,
-        permissions: PermissionSnapshot
+        permissions: PermissionSnapshot,
+        isProcessingReady: Bool
     ) {
         if settings.isAwaitingScreenCaptureRelaunch {
             step = .restart
         } else if !settings.hasAcceptedConsentChecklist {
             step = .welcome
+        } else if !settings.hasSelectedProcessingMode || !isProcessingReady {
+            step = .processing
         } else if !permissions.microphone.isAuthorized {
             step = .microphone
         } else if !permissions.screenCapture.isAuthorized {

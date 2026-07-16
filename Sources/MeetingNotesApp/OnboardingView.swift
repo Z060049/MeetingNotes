@@ -3,12 +3,16 @@ import SwiftUI
 
 struct OnboardingView: View {
     @ObservedObject var controller: MeetingNotesController
+    @ObservedObject private var localModelManager: LocalModelManager
     let onFinish: () -> Void
     let onRestart: () -> Void
 
     @State private var flow: OnboardingFlowState
     @State private var understandsConsent = false
     @State private var understandsIndicator = false
+    @State private var selectedProcessingMode: ProcessingMode
+    @State private var groqAPIKey = ""
+    @State private var processingError: String?
 
     init(
         controller: MeetingNotesController,
@@ -16,12 +20,15 @@ struct OnboardingView: View {
         onRestart: @escaping () -> Void
     ) {
         self.controller = controller
+        self.localModelManager = controller.localModelManager
         self.onFinish = onFinish
         self.onRestart = onRestart
+        _selectedProcessingMode = State(initialValue: controller.settings.processingMode)
         _flow = State(
             initialValue: OnboardingFlowState(
                 settings: controller.settings,
-                permissions: controller.permissionSnapshot
+                permissions: controller.permissionSnapshot,
+                isProcessingReady: controller.isProcessingSetupReady
             )
         )
     }
@@ -37,6 +44,8 @@ struct OnboardingView: View {
                     welcomeStep
                 case .consent:
                     consentStep
+                case .processing:
+                    processingStep
                 case .microphone:
                     microphoneStep
                 case .systemAudio:
@@ -86,7 +95,7 @@ struct OnboardingView: View {
         ) {
             VStack(spacing: 10) {
                 benefitRow(symbol: "rectangle.3.group.bubble", text: "Works with Zoom, Google Meet, Teams, and more")
-                benefitRow(symbol: "lock.macwindow", text: "Designed for local, private processing")
+                benefitRow(symbol: "cpu", text: "Choose fast Groq API or private local processing")
                 benefitRow(symbol: "doc.text", text: "Creates summaries, action items, and transcripts")
             }
             .frame(maxWidth: 470)
@@ -121,6 +130,163 @@ struct OnboardingView: View {
                 state: controller.permissionSnapshot.microphone
             )
         }
+    }
+
+    private var processingStep: some View {
+        stepLayout(
+            symbol: "cpu",
+            title: "Choose how to process notes",
+            message: "You can change this later in Settings."
+        ) {
+            VStack(spacing: 12) {
+                HStack(spacing: 12) {
+                    processingModeCard(
+                        mode: .api,
+                        title: "Groq API (Recommended)",
+                        detail: "Fast cloud processing with a rate-limited free tier.",
+                        symbol: "cloud",
+                        disabled: false
+                    )
+                    processingModeCard(
+                        mode: .local,
+                        title: "Local",
+                        detail: "Private, no API key. Downloads models once.",
+                        symbol: "lock.macwindow",
+                        disabled: localModelManager.summarizationTier == .unavailable
+                    )
+                }
+
+                if selectedProcessingMode == .local {
+                    localProcessingSetup
+                } else {
+                    groqProcessingSetup
+                }
+
+                if let processingError {
+                    Text(processingError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: 590)
+        }
+        .onAppear {
+            if !controller.settings.hasSelectedProcessingMode {
+                controller.selectProcessingMode(selectedProcessingMode)
+            }
+        }
+    }
+
+    private func processingModeCard(
+        mode: ProcessingMode,
+        title: String,
+        detail: String,
+        symbol: String,
+        disabled: Bool
+    ) -> some View {
+        Button {
+            processingError = nil
+            selectedProcessingMode = mode
+            controller.selectProcessingMode(mode)
+        } label: {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Image(systemName: symbol)
+                    Text(title).fontWeight(.semibold)
+                    Spacer()
+                    if selectedProcessingMode == mode {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(Color.accentColor)
+                    }
+                }
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.leading)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, minHeight: 88, alignment: .leading)
+            .background(
+                selectedProcessingMode == mode
+                    ? Color.accentColor.opacity(0.12)
+                    : Color.secondary.opacity(0.08),
+                in: RoundedRectangle(cornerRadius: 12)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(selectedProcessingMode == mode ? Color.accentColor : Color.clear, lineWidth: 1.5)
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .opacity(disabled ? 0.5 : 1)
+    }
+
+    @ViewBuilder
+    private var localProcessingSetup: some View {
+        if localModelManager.summarizationTier == .unavailable {
+            Text("Local processing requires Apple Silicon. Choose Groq API on this Mac.")
+                .font(.caption)
+                .foregroundStyle(.red)
+        } else {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    modelStateRow("Speech model", state: localModelManager.whisperDownloadState)
+                    if localModelManager.summarizationTier == .mlx {
+                        modelStateRow("Summary model", state: localModelManager.mlxDownloadState)
+                    } else {
+                        Label("Apple Intelligence ready", systemImage: "checkmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    }
+                }
+                Spacer()
+                if !controller.isProcessingSetupReady {
+                    Button("Download Models") {
+                        downloadLocalModels()
+                    }
+                    .disabled(isDownloadingModels)
+                }
+            }
+            .padding(12)
+            .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
+        }
+    }
+
+    private var groqProcessingSetup: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if controller.hasGroqAPIKey {
+                HStack {
+                    Label("Groq API key saved in Keychain", systemImage: "checkmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.green)
+                    Spacer()
+                    Button("Replace") {
+                        try? controller.deleteGroqAPIKey()
+                    }
+                }
+            } else {
+                HStack {
+                    SecureField("Paste GROQ_API_KEY", text: $groqAPIKey)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Save Key") {
+                        do {
+                            try controller.saveGroqAPIKey(groqAPIKey)
+                            groqAPIKey = ""
+                            processingError = nil
+                        } catch {
+                            processingError = error.localizedDescription
+                        }
+                    }
+                    .disabled(groqAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+            Link("Create a Groq API key", destination: URL(string: "https://console.groq.com/keys")!)
+                .font(.caption)
+        }
+        .padding(12)
+        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
     }
 
     private var systemAudioStep: some View {
@@ -202,6 +368,11 @@ struct OnboardingView: View {
                     flow.advance()
                 }
                 .disabled(!understandsConsent || !understandsIndicator)
+            case .processing:
+                primaryButton("Continue") {
+                    flow.advance()
+                }
+                .disabled(!controller.isProcessingSetupReady)
             case .microphone:
                 microphoneAction
             case .systemAudio:
@@ -214,18 +385,24 @@ struct OnboardingView: View {
                     onRestart()
                 }
             case .ready:
-                if controller.permissionSnapshot.isReady {
+                if controller.permissionSnapshot.isReady && controller.isProcessingSetupReady {
                     primaryButton("Finish") {
                         controller.completeOnboarding()
-                        onFinish()
+                        if controller.isSetupComplete {
+                            onFinish()
+                        }
                     }
                 } else {
-                    primaryButton("Review Permissions") {
-                        flow.move(
-                            to: controller.permissionSnapshot.microphone.isAuthorized
-                                ? .systemAudio
-                                : .microphone
-                        )
+                    primaryButton("Review Setup") {
+                        if !controller.isProcessingSetupReady {
+                            flow.move(to: .processing)
+                        } else {
+                            flow.move(
+                                to: controller.permissionSnapshot.microphone.isAuthorized
+                                    ? .systemAudio
+                                    : .microphone
+                            )
+                        }
                     }
                 }
             }
@@ -346,5 +523,50 @@ struct OnboardingView: View {
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
             .keyboardShortcut(.defaultAction)
+    }
+
+    private func downloadLocalModels() {
+        processingError = nil
+        Task {
+            do {
+                try await localModelManager.prepareWhisperModel(controller.settings.whisperModel)
+                if localModelManager.summarizationTier == .mlx {
+                    try await localModelManager.prepareMLXModel(modelID: controller.settings.localLLMModel)
+                }
+            } catch {
+                processingError = error.localizedDescription
+            }
+        }
+    }
+
+    private func modelStateRow(_ title: String, state: ModelDownloadState) -> some View {
+        HStack(spacing: 6) {
+            switch state {
+            case .notDownloaded:
+                Image(systemName: "arrow.down.circle").foregroundStyle(.secondary)
+                Text("\(title): not downloaded")
+            case .downloading(let progress):
+                ProgressView(value: progress).frame(width: 70)
+                Text("\(title): \(Int(progress * 100))%")
+            case .loading:
+                ProgressView().controlSize(.small)
+                Text("\(title): loading")
+            case .ready:
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                Text("\(title): ready")
+            case .failed:
+                Image(systemName: "exclamationmark.circle").foregroundStyle(.red)
+                Text("\(title): failed")
+            }
+        }
+        .font(.caption)
+    }
+
+    private var isDownloadingModels: Bool {
+        if case .downloading = localModelManager.whisperDownloadState { return true }
+        if case .loading = localModelManager.whisperDownloadState { return true }
+        if case .downloading = localModelManager.mlxDownloadState { return true }
+        if case .loading = localModelManager.mlxDownloadState { return true }
+        return false
     }
 }

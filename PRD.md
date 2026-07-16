@@ -20,7 +20,7 @@ Status as of Jul 12, 2026:
 - The app currently runs as a local development `.app` bundle built from Swift Package Manager.
 - Manual menu-bar recording works for the tested happy path.
 - Microphone and system audio are captured into separate temporary files.
-- OpenAI API mode can transcribe, summarize, and export Markdown successfully.
+- Groq API mode can transcribe, summarize, and export Markdown successfully.
 - Local transcription with WhisperKit and local summarization with Foundation Models or MLX have been implemented and tested end-to-end.
 - Markdown output has been validated with a short real recording and saved to `~/Documents/MeetingNotes/`.
 - Broader reliability testing, UX simplification, and production packaging remain outstanding.
@@ -30,7 +30,7 @@ Current development workflow:
 - Build the local test app with `./scripts/build-dev-app.sh`.
 - Launch the app with `open .build/MeetingNotes.app`.
 - For shortcut testing, grant Accessibility permission to `.build/MeetingNotes.app`.
-- Store the OpenAI API key through the app settings UI; the key is saved in macOS Keychain.
+- Store the Groq API key through the app settings UI; the key is saved in macOS Keychain.
 
 Validated output example:
 
@@ -67,7 +67,7 @@ Users need a single Mac-native tool that works everywhere, starts/stops quickly,
 
 - App stack: native macOS Swift/SwiftUI menu-bar app.
 - Packaging during development: Swift Package Manager executable wrapped into a local `.app` bundle.
-- API provider: OpenAI for speech-to-text and summarization.
+- API provider: Groq for speech-to-text and summarization.
 - API key storage: macOS Keychain.
 - Audio capture strategy:
   - Microphone: AVFoundation recording to `.wav`.
@@ -150,7 +150,7 @@ Users need a single Mac-native tool that works everywhere, starts/stops quickly,
 - Configure output folder
 - Configure summary depth (brief/standard/detailed)
 - Configure consent reminder prompt before capture
-- Configure/store OpenAI API key securely via Keychain
+- Configure/store Groq API key securely via Keychain
 
 ## 7) User experience requirements
 
@@ -264,7 +264,7 @@ Phase 3:
 
 ## 12.1 Bugs found and fixed during MVP testing
 
-- Standard copy/paste did not work in the OpenAI API key field.
+- Standard copy/paste did not work in the API key field.
   - Cause: the menu-bar app did not install a normal macOS Edit menu.
   - Fix: added Cut, Copy, Paste, and Select All menu commands.
 - Double-tap Command did not trigger recording during development testing.
@@ -276,12 +276,12 @@ Phase 3:
 - System audio recording failed with `The audio writer was not available`.
   - Cause: `.m4a` `AVAssetWriterInput` lacked explicit AAC output settings.
   - Fix: configured AAC sample rate, channel count, and bit rate for system audio output.
-- OpenAI transcription rejected microphone audio.
-  - Cause: microphone was recorded as `.caf`, which OpenAI speech-to-text does not support.
+- API transcription rejected microphone audio.
+  - Cause: microphone was recorded as `.caf`, which the speech-to-text API does not support.
   - Fix: switched microphone recording to `.wav` and selected upload MIME types by extension.
 - Processing failed with an invalid summary response.
   - Cause: summary parsing expected a single exact JSON response shape.
-  - Fix: requested strict JSON schema from OpenAI, added response-shape fallbacks, and improved error diagnostics.
+  - Fix: requested strict JSON schema, added response-shape fallbacks, and improved error diagnostics.
 - Silent or near-silent system audio produced plausible fake transcript text.
   - Cause: STT can hallucinate on tiny/silent audio files.
   - Fix: added a first-pass guard that skips very small system-audio files and logs captured file sizes for tuning.
@@ -421,7 +421,7 @@ Done when a new user can download, install, configure, and complete a meeting wi
 - Is "double Command" the final shortcut, or should users configure any global hotkey after MVP?
 - Should we store raw audio long-term or delete by default after transcript generation?
 - Do we require speaker diarization in MVP or treat it as best-effort?
-- Which OpenAI transcription/summarization models should be used for cost/quality tuning?
+- Which Groq transcription/summarization models should be used for cost/quality tuning?
 - What minimum Mac hardware should local mode officially support?
 - What is the right production onboarding copy for Accessibility, microphone, and system audio permissions?
 
@@ -444,14 +444,14 @@ This section captures the recommended path for distributing and marketing Meetin
 
 The processing pipeline splits into two very different steps, and they should not be treated the same way:
 
-- Transcription (audio to text) is the expensive, high-volume step and requires a speech model (OpenAI Whisper today). Anthropic/Claude has no speech-to-text API, and "Codex" is a coding agent, not a transcription service.
-- Summarization (text to notes) is cheap and provider-agnostic; OpenAI, Claude, Gemini, or a local model can all do it.
+- Transcription (audio to text) is the expensive, high-volume step and requires a speech model (Groq-hosted Whisper in API mode). Anthropic/Claude has no speech-to-text API, and "Codex" is a coding agent, not a transcription service.
+- Summarization (text to notes) is cheap and provider-agnostic; Groq, Claude, Gemini, or a local model can all do it.
 
-Implication: "let users log in with Claude/Codex" does not map onto what the app does. There is also no consumer OAuth that lets a third-party app bill transcription against someone's ChatGPT or Claude subscription. The only realistic bring-your-own-key (BYOK) flow is pasting an API key, which the app already supports for OpenAI.
+Implication: "let users log in with Claude/Codex" does not map onto what the app does. There is also no consumer OAuth that lets a third-party app bill transcription against someone's ChatGPT or Claude subscription. The realistic bring-your-own-key (BYOK) flow is pasting a Groq API key.
 
 Therefore the prior decision before any distribution model is: where does transcription run?
 
-- Keep it on OpenAI Whisper (per-minute cost, mandatory key), or
+- Keep it on Groq-hosted Whisper (rate-limited free tier, mandatory key), or
 - Move it on-device (whisper.cpp, or Apple `SpeechTranscriber`/`SpeechAnalyzer` on macOS 26). On-device transcription is free, private, needs no key, and removes the biggest cost and liability driver. BYOK then only matters for the cheap summary step.
 
 ### 15.2 Evaluation of the two distribution options
@@ -466,7 +466,7 @@ Option A — open source on GitHub, BYOK:
 
 - Best long-term: zero cost to maintainer, no liability for user API spend, infinite scale, developer credibility, and a natural privacy story.
 - Frictions to plan for:
-  - Audience filter: "get an OpenAI API key" excludes non-technical users; on-device transcription softens this a lot.
+  - Audience filter: "get an API key" excludes non-technical users; on-device transcription avoids this.
   - Distribution: unsigned Mac apps hit Gatekeeper; signing/notarization (Track 4) is not done.
   - Legal/consent: BYOK and/or on-device means the maintainer never touches user audio, which is a selling point, not just a cost saver.
 
@@ -480,12 +480,12 @@ Option A — open source on GitHub, BYOK:
 
 ### 15.4 Positioning
 
-Target hook once transcription is on-device: "On-device meeting notes for any Mac call — works on Zoom, Meet, Teams, or a phone call, and your audio never leaves your machine." This is sharper than "another transcriber where you bring an OpenAI key."
+Target hook once transcription is on-device: "On-device meeting notes for any Mac call — works on Zoom, Meet, Teams, or a phone call, and your audio never leaves your machine." This is sharper than "another transcriber where you bring an API key."
 
 ### 15.5 Engineering prerequisites (shared by both paths)
 
-- Abstract the summarization provider so OpenAI and Claude are swappable behind `ProcessingProvider`.
-- Add an on-device transcription path alongside the existing OpenAI provider.
+- Keep summarization providers swappable behind `ProcessingProvider`.
+- Maintain the on-device transcription path alongside the Groq provider.
 - Complete production packaging (signing/notarization) from Track 4 before public distribution.
 
 ### 15.6 Open go-to-market questions
@@ -561,7 +561,7 @@ The current UI exposes too much at once — a mode toggle, separate download but
 | Main popover          | Shows Settings + Debug + Quit                                                   | Shows status, Start/Stop, last output path, Quit                                        |
 | Debug panel           | Expanded by default                                                             | Hidden by default; accessible via long-press or developer flag                          |
 | Settings — Local mode | Shows MLX tier badge, model IDs, separate download buttons for Whisper and Qwen | Single "Download models" action; show combined progress; hide model IDs unless expanded |
-| Settings — API mode   | Shows OpenAI key field alongside local model section                            | Only show the controls relevant to the active mode                                      |
+| Settings — API mode   | Shows Groq key field alongside local model section                              | Only show the controls relevant to the active mode                                      |
 | Mode switching        | Available in Settings at any time                                               | Available in Settings; warn if switching while models are downloading                   |
 
 
@@ -652,11 +652,11 @@ This is a separate product with a separate codebase. Swift code cannot be reused
 | RAM         | 8 GB                | 16 GB (headroom for large models) |
 | Storage     | 1 GB free           | 2 GB (room for model upgrades)    |
 
-## 20. Hidden Features
+## 20. Processing Modes
 
-### 20.1 API processing
+### 20.1 Groq API processing
 
-- The OpenAI API processing mode is hidden from Settings for the local-first release.
-- Settings now exposes only on-device transcription and summarization.
-- The API implementation remains in the codebase; this is a UI-level product decision, not feature removal.
-- API mode may be restored after its setup, privacy messaging, error handling, and product role are clearly defined.
+- Settings and onboarding expose Groq API (Recommended) and Local processing.
+- Local mode downloads required models during onboarding and keeps audio/transcripts on the Mac.
+- Groq API mode stores `GROQ_API_KEY` in macOS Keychain and sends audio/transcript text to Groq.
+- Groq's free tier is rate-limited; users can change modes later in Settings.

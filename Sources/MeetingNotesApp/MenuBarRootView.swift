@@ -114,7 +114,7 @@ struct MenuBarRootView: View {
         VStack(alignment: .leading, spacing: 10) {
             Label("Finish setup before recording", systemImage: "checklist")
                 .font(.headline)
-            Text("MeetingNotes needs Microphone and Screen & System Audio Recording access.")
+            Text("Choose a processing mode, finish its setup, and grant Microphone and Screen & System Audio Recording access.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

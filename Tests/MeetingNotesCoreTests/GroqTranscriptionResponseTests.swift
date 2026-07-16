@@ -1,7 +1,7 @@
 @testable import MeetingNotesCore
 import XCTest
 
-final class OpenAITranscriptionResponseTests: XCTestCase {
+final class GroqTranscriptionResponseTests: XCTestCase {
     func testVerboseJSONSegmentsUseCaptureAndTrimOffsets() throws {
         let response = Data("""
         {
@@ -13,7 +13,7 @@ final class OpenAITranscriptionResponseTests: XCTestCase {
         }
         """.utf8)
 
-        let segments = try OpenAIProcessingProvider.decodeTranscriptionSegments(
+        let segments = try GroqProcessingProvider.decodeTranscriptionSegments(
             from: response,
             source: .microphone,
             timelineOffset: 42.3
@@ -33,7 +33,7 @@ final class OpenAITranscriptionResponseTests: XCTestCase {
         {"text": "Fallback transcription."}
         """.utf8)
 
-        let segments = try OpenAIProcessingProvider.decodeTranscriptionSegments(
+        let segments = try GroqProcessingProvider.decodeTranscriptionSegments(
             from: response,
             source: .systemAudio,
             timelineOffset: 12
@@ -57,12 +57,12 @@ final class OpenAITranscriptionResponseTests: XCTestCase {
         }
         """.utf8)
 
-        let microphone = try OpenAIProcessingProvider.decodeTranscriptionSegments(
+        let microphone = try GroqProcessingProvider.decodeTranscriptionSegments(
             from: response,
             source: .microphone,
             timelineOffset: 10
         )
-        let systemAudio = try OpenAIProcessingProvider.decodeTranscriptionSegments(
+        let systemAudio = try GroqProcessingProvider.decodeTranscriptionSegments(
             from: response,
             source: .systemAudio,
             timelineOffset: 75
@@ -72,5 +72,16 @@ final class OpenAITranscriptionResponseTests: XCTestCase {
         XCTAssertEqual(microphone.first?.startTime, 11)
         XCTAssertEqual(systemAudio.first?.speaker, AudioSource.systemAudio.rawValue)
         XCTAssertEqual(systemAudio.first?.startTime, 76)
+    }
+
+    func testChatCompletionExtractsMessageContent() throws {
+        let response = Data("""
+        {"choices":[{"message":{"role":"assistant","content":"Meeting summary JSON"}}]}
+        """.utf8)
+
+        XCTAssertEqual(
+            try GroqProcessingProvider.decodeChatCompletionText(from: response),
+            "Meeting summary JSON"
+        )
     }
 }

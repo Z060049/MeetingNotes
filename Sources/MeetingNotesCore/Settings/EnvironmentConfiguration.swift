@@ -1,17 +1,31 @@
 import Foundation
 
 public enum EnvironmentConfiguration {
-    public static let openAIAPIKeyName = "OPENAI_API_KEY"
+    public static let groqAPIKeyName = "GROQ_API_KEY"
 
-    public static func openAIAPIKey() -> String? {
-        if let value = ProcessInfo.processInfo.environment[openAIAPIKeyName],
+    public static func groqAPIKey(
+        credentialStore: APICredentialStoring = KeychainAPICredentialStore()
+    ) -> String? {
+        do {
+            if let keychainValue = try credentialStore.apiKey(), !keychainValue.isEmpty {
+                return keychainValue
+            }
+        } catch {
+            // Development environment and .env files remain a fallback if
+            // Keychain is temporarily unavailable.
+        }
+        return groqAPIKeyFromEnvironment()
+    }
+
+    public static func groqAPIKeyFromEnvironment() -> String? {
+        if let value = ProcessInfo.processInfo.environment[groqAPIKeyName],
            !value.isEmpty {
             return value
         }
 
         for url in candidateEnvFileURLs() {
             if let contents = try? String(contentsOf: url, encoding: .utf8),
-               let value = value(forKey: openAIAPIKeyName, inEnvFileContents: contents) {
+               let value = value(forKey: groqAPIKeyName, inEnvFileContents: contents) {
                 return value
             }
         }

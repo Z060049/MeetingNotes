@@ -8,7 +8,8 @@ final class OnboardingFlowTests: XCTestCase {
             permissions: PermissionSnapshot(
                 microphone: .notDetermined,
                 screenCapture: .notDetermined
-            )
+            ),
+            isProcessingReady: false
         )
 
         XCTAssertEqual(flow.step, .welcome)
@@ -23,16 +24,20 @@ final class OnboardingFlowTests: XCTestCase {
             permissions: PermissionSnapshot(
                 microphone: .denied,
                 screenCapture: .denied
-            )
+            ),
+            isProcessingReady: false
         )
-        XCTAssertEqual(microphoneFlow.step, .microphone)
+        XCTAssertEqual(microphoneFlow.step, .processing)
+
+        settings.hasSelectedProcessingMode = true
 
         let systemAudioFlow = OnboardingFlowState(
             settings: settings,
             permissions: PermissionSnapshot(
                 microphone: .authorized,
                 screenCapture: .denied
-            )
+            ),
+            isProcessingReady: true
         )
         XCTAssertEqual(systemAudioFlow.step, .systemAudio)
     }
@@ -47,7 +52,8 @@ final class OnboardingFlowTests: XCTestCase {
             permissions: PermissionSnapshot(
                 microphone: .authorized,
                 screenCapture: .restartRequired
-            )
+            ),
+            isProcessingReady: false
         )
 
         XCTAssertEqual(flow.step, .restart)
@@ -56,16 +62,35 @@ final class OnboardingFlowTests: XCTestCase {
     func testGrantedPermissionsResumeAtReady() {
         var settings = AppSettings()
         settings.hasAcceptedConsentChecklist = true
+        settings.hasSelectedProcessingMode = true
 
         let flow = OnboardingFlowState(
             settings: settings,
             permissions: PermissionSnapshot(
                 microphone: .authorized,
                 screenCapture: .authorized
-            )
+            ),
+            isProcessingReady: true
         )
 
         XCTAssertEqual(flow.step, .ready)
+    }
+
+    func testSelectedModeResumesAtProcessingUntilItsSetupIsReady() {
+        var settings = AppSettings()
+        settings.hasAcceptedConsentChecklist = true
+        settings.hasSelectedProcessingMode = true
+
+        let flow = OnboardingFlowState(
+            settings: settings,
+            permissions: PermissionSnapshot(
+                microphone: .authorized,
+                screenCapture: .authorized
+            ),
+            isProcessingReady: false
+        )
+
+        XCTAssertEqual(flow.step, .processing)
     }
 
     func testFlowNavigation() {
@@ -74,13 +99,16 @@ final class OnboardingFlowTests: XCTestCase {
             permissions: PermissionSnapshot(
                 microphone: .notDetermined,
                 screenCapture: .notDetermined
-            )
+            ),
+            isProcessingReady: false
         )
 
         flow.advance()
         XCTAssertEqual(flow.step, .consent)
+        flow.advance()
+        XCTAssertEqual(flow.step, .processing)
         flow.goBack()
-        XCTAssertEqual(flow.step, .welcome)
+        XCTAssertEqual(flow.step, .consent)
         flow.move(to: .systemAudio)
         XCTAssertEqual(flow.step, .systemAudio)
     }
@@ -104,6 +132,35 @@ final class OnboardingFlowTests: XCTestCase {
         XCTAssertEqual(controller.state, .idle)
         XCTAssertNotNil(controller.lastError)
         XCTAssertFalse(controller.isSetupComplete)
+    }
+
+    @MainActor
+    func testAPIModeRequiresStoredGroqKey() {
+        let suiteName = "MeetingNotesAPISetupTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = SettingsStore(defaults: defaults)
+        store.save(
+            AppSettings(
+                processingMode: .api,
+                hasAcceptedConsentChecklist: true,
+                hasCompletedOnboarding: true,
+                hasSelectedProcessingMode: true
+            )
+        )
+        let credentials = FakeCredentialStore()
+        let controller = MeetingNotesController(
+            settingsStore: store,
+            permissionService: FakePermissionService(
+                microphone: .authorized,
+                screenCapture: .authorized
+            ),
+            credentialStore: credentials
+        )
+
+        XCTAssertFalse(controller.isSetupComplete)
+        try? controller.saveGroqAPIKey("gsk_test")
+        XCTAssertTrue(controller.isSetupComplete)
     }
 }
 
@@ -140,4 +197,12 @@ private final class FakePermissionService: PermissionServicing {
 
     func openMicrophoneSettings() {}
     func openScreenCaptureSettings() {}
+}
+
+private final class FakeCredentialStore: APICredentialStoring, @unchecked Sendable {
+    private var value: String?
+
+    func apiKey() throws -> String? { value }
+    func saveAPIKey(_ apiKey: String) throws { value = apiKey }
+    func deleteAPIKey() throws { value = nil }
 }
