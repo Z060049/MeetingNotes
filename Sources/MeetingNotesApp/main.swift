@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
     private var popoverHostingController: NSHostingController<MenuBarRootView>?
+    private var onboardingWindowController: OnboardingWindowController?
     private var cancellables = Set<AnyCancellable>()
     private var isShowingSilenceAlert = false
     private var isShowingProcessingAlert = false
@@ -31,10 +32,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         configureMainMenu()
         configureStatusItem()
         configurePopover()
+        configureOnboarding()
         bindState()
         bindPopoverContentSize()
         bindSilencePrompt()
         bindProcessingFailure()
+        bindPermissionRefresh()
+
+        if !controller.isSetupComplete {
+            DispatchQueue.main.async { [weak self] in
+                self?.presentOnboarding()
+            }
+        }
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -104,6 +113,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let hostingController = NSHostingController(
             rootView: MenuBarRootView(
                 controller: controller,
+                onOpenOnboarding: { [weak self] in
+                    self?.presentOnboarding()
+                },
                 onPreferredSizeChange: { [weak self] in
                     Task { @MainActor [weak self] in
                         self?.resizePopoverToFit()
@@ -119,6 +131,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.popoverHostingController = hostingController
         self.popover = popover
         resizePopoverToFit()
+    }
+
+    private func configureOnboarding() {
+        onboardingWindowController = OnboardingWindowController(controller: controller)
+        controller.onboardingRequested
+            .receive(on: RunLoop.main)
+            .sink { [weak self] in
+                self?.presentOnboarding()
+            }
+            .store(in: &cancellables)
+    }
+
+    private func presentOnboarding() {
+        popover?.performClose(nil)
+        onboardingWindowController?.present()
+    }
+
+    private func bindPermissionRefresh() {
+        NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.controller.refreshPermissionStatus()
+            }
+            .store(in: &cancellables)
     }
 
     private func bindState() {

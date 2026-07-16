@@ -313,6 +313,7 @@ private actor CaptureCoordinator {
         let filename = String(format: "system-audio-%04d.wav", index)
 
         var lastError: Error?
+        var failedBackends: [String] = []
         for recorder in systemAudioRecorders {
             do {
                 let url = try await recorder.start(in: session.temporaryDirectory, filename: filename)
@@ -331,11 +332,18 @@ private actor CaptureCoordinator {
                     ),
                     route: route
                 )
+                if !failedBackends.isEmpty {
+                    diagnostics.append(
+                        "System audio fallback selected \(recorder.backendName) after \(failedBackends.joined(separator: "; "))."
+                    )
+                }
                 diagnostics.append("System audio segment \(url.lastPathComponent) started at \(offset)s with \(recorder.backendName).")
                 return
             } catch {
                 lastError = error
-                diagnostics.append("\(recorder.backendName) unavailable during route setup: \(error.localizedDescription)")
+                let failure = "\(recorder.backendName) unavailable: \(error.localizedDescription)"
+                failedBackends.append(failure)
+                diagnostics.append("\(failure) during route setup.")
             }
         }
         throw lastError ?? AudioCaptureError.systemAudioBackendUnavailable(

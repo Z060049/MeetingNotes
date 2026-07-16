@@ -11,6 +11,9 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(settings.summaryDepth, .standard)
         XCTAssertTrue(settings.shouldShowConsentReminder)
         XCTAssertFalse(settings.hasAcceptedConsentChecklist)
+        XCTAssertFalse(settings.hasCompletedOnboarding)
+        XCTAssertFalse(settings.hasRequestedScreenCapturePermission)
+        XCTAssertFalse(settings.isAwaitingScreenCaptureRelaunch)
     }
 
     func testSaveAndLoadSettings() {
@@ -25,7 +28,10 @@ final class SettingsStoreTests: XCTestCase {
             inactivityTimeoutSeconds: 120,
             summaryDepth: .detailed,
             shouldShowConsentReminder: false,
-            hasAcceptedConsentChecklist: true
+            hasAcceptedConsentChecklist: true,
+            hasCompletedOnboarding: true,
+            hasRequestedScreenCapturePermission: true,
+            isAwaitingScreenCaptureRelaunch: true
         )
 
         store.save(expected)

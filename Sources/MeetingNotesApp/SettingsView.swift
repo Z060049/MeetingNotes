@@ -5,6 +5,7 @@ import SwiftUI
 struct SettingsView: View {
     @ObservedObject var controller: MeetingNotesController
     @ObservedObject private var localModelManager: LocalModelManager
+    private let onOpenOnboarding: () -> Void
     @Environment(\.dismiss) private var dismiss
 
     @State private var settings: AppSettings
@@ -12,9 +13,13 @@ struct SettingsView: View {
     @State private var whisperError: String?
     @State private var mlxError: String?
 
-    init(controller: MeetingNotesController) {
+    init(
+        controller: MeetingNotesController,
+        onOpenOnboarding: @escaping () -> Void = {}
+    ) {
         self.controller = controller
         self.localModelManager = controller.localModelManager
+        self.onOpenOnboarding = onOpenOnboarding
         var visibleSettings = controller.settings
         visibleSettings.processingMode = .local
         _settings = State(initialValue: visibleSettings)
@@ -69,6 +74,23 @@ struct SettingsView: View {
                         .textSelection(.enabled)
                     Button("Choose Folder") {
                         chooseOutputFolder()
+                    }
+                }
+                .padding(4)
+            }
+
+            GroupBox("Permissions") {
+                VStack(alignment: .leading, spacing: 10) {
+                    permissionRow(
+                        "Microphone",
+                        state: controller.permissionSnapshot.microphone
+                    )
+                    permissionRow(
+                        "Screen & System Audio Recording",
+                        state: controller.permissionSnapshot.screenCapture
+                    )
+                    Button("Review Permissions") {
+                        onOpenOnboarding()
                     }
                 }
                 .padding(4)
@@ -247,6 +269,18 @@ struct SettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.red)
                 .help(msg)
+        }
+    }
+
+    private func permissionRow(_ title: String, state: PermissionState) -> some View {
+        HStack {
+            Image(systemName: state.isAuthorized ? "checkmark.circle.fill" : "exclamationmark.circle")
+                .foregroundStyle(state.isAuthorized ? .green : .orange)
+            Text(title)
+            Spacer()
+            Text(state.isAuthorized ? "Granted" : "Needs attention")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 

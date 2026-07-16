@@ -126,6 +126,31 @@ final class AudioHotSwapTests: XCTestCase {
         XCTAssertTrue(result.diagnostics.contains { $0.contains("Microphone did not reconnect") })
     }
 
+    func testSystemAudioFallsBackAndReportsFailedBackend() async throws {
+        let preferred = FakeSystemAudioRecorder(
+            backendName: "ScreenCaptureKit",
+            failOnStart: true
+        )
+        let fallback = FakeSystemAudioRecorder(backendName: "Core Audio Tap")
+        let service = DualAudioCaptureService(
+            microphoneRecorder: FakeMicrophoneRecorder(),
+            systemAudioRecorders: [preferred, fallback],
+            routeMonitor: FakeRouteMonitor()
+        )
+        let directory = temporaryDirectory()
+
+        let warnings = try await service.start(session: session(directory: directory))
+        let result = try await service.stop()
+
+        XCTAssertEqual(preferred.startCount, 1)
+        XCTAssertEqual(fallback.startCount, 1)
+        XCTAssertTrue(warnings.contains { $0.contains("Core Audio Tap") })
+        XCTAssertTrue(result.diagnostics.contains {
+            $0.contains("fallback selected Core Audio Tap")
+                && $0.contains("ScreenCaptureKit unavailable")
+        })
+    }
+
     func testStopDuringReconnectCancelsRestartAndFinalizesOnce() async throws {
         let microphone = FakeMicrophoneRecorder(delayOnStartNumber: 2)
         let systemAudio = FakeSystemAudioRecorder()
@@ -350,11 +375,12 @@ private final class FakeMicrophoneRecorder: MicrophoneRecording, @unchecked Send
 }
 
 private final class FakeSystemAudioRecorder: SystemAudioRecording, @unchecked Sendable {
-    let backendName = "Fake System Audio"
+    let backendName: String
     var diagnosticSummary: String? { nil }
     var onAudioLevel: ((Float) -> Void)?
 
     private let lock = NSLock()
+    private let failOnStart: Bool
     private var activeURL: URL?
     private var starts = 0
     private var stops = 0
@@ -362,12 +388,24 @@ private final class FakeSystemAudioRecorder: SystemAudioRecording, @unchecked Se
     var startCount: Int { lock.withLock { starts } }
     var stopCount: Int { lock.withLock { stops } }
 
+    init(backendName: String = "Fake System Audio", failOnStart: Bool = false) {
+        self.backendName = backendName
+        self.failOnStart = failOnStart
+    }
+
     func start(in directory: URL, filename: String) async throws -> URL {
+        lock.withLock {
+            starts += 1
+        }
+        if failOnStart {
+            throw AudioCaptureError.systemAudioBackendUnavailable(
+                "\(backendName) failed during testing."
+            )
+        }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let url = directory.appendingPathComponent(filename)
         try Data([0]).write(to: url)
         lock.withLock {
-            starts += 1
             activeURL = url
         }
         return url

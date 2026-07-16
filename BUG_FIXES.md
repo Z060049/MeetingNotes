@@ -95,7 +95,7 @@ Three issues combined:
 - Updated `buildPrompt` in `LocalSummarizationService.swift` to use `textForSummarization` and added an explicit rule: *"Write each keyPoint as a concise insight in your own words — do not copy transcript sentences verbatim."*
 - Updated `OpenAIProcessingProvider.swift` to use `textForSummarization` for consistency.
 
-## Open bug: Zoom cannot be used when MeetingNotes starts first
+## Zoom cannot be used when MeetingNotes starts first
 
 ### Symptoms
 
@@ -113,13 +113,23 @@ Three issues combined:
 
 Zoom should open and work normally regardless of whether MeetingNotes is already running or recording.
 
-### Workaround
+### Cause
 
-Open Zoom first, then start recording in MeetingNotes.
+MeetingNotes preferred a Core Audio process tap that created a private aggregate audio device. When MeetingNotes started that device before Zoom initialized its audio session, Zoom could hang. A denied ScreenCaptureKit permission also caused MeetingNotes to fall back automatically to the same conflicting Core Audio path.
 
-### Status
+### Fix
 
-Unresolved. The cause has not yet been investigated.
+- Made ScreenCaptureKit the only automatic system-audio backend.
+- Removed the automatic Core Audio Tap fallback so a missing permission cannot reintroduce the Zoom conflict or trigger a second permission request.
+- Added a guided permission onboarding flow for Microphone and Screen & System Audio Recording.
+- Added live permission preflight checks so recording cannot repeatedly trigger macOS permission dialogs.
+- Added a required-restart step after Screen & System Audio Recording is enabled.
+
+### Verification
+
+- Confirmed Zoom works when MeetingNotes starts recording first.
+- Confirmed Zoom works when it starts before MeetingNotes.
+- Confirmed diagnostics identify ScreenCaptureKit as the system-audio backend.
 
 ## Verification
 

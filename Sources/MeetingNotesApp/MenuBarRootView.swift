@@ -4,15 +4,18 @@ import SwiftUI
 
 struct MenuBarRootView: View {
     @ObservedObject var controller: MeetingNotesController
+    private let onOpenOnboarding: () -> Void
     private let onPreferredSizeChange: () -> Void
     @State private var showingSettings = false
     @State private var showingDiagnostics = false
 
     init(
         controller: MeetingNotesController,
+        onOpenOnboarding: @escaping () -> Void = {},
         onPreferredSizeChange: @escaping () -> Void = {}
     ) {
         _controller = ObservedObject(wrappedValue: controller)
+        self.onOpenOnboarding = onOpenOnboarding
         self.onPreferredSizeChange = onPreferredSizeChange
     }
 
@@ -20,10 +23,10 @@ struct MenuBarRootView: View {
         VStack(alignment: .leading, spacing: 16) {
             header
 
-            if !controller.settings.hasAcceptedConsentChecklist {
-                ConsentChecklistView(controller: controller)
-            } else {
+            if controller.isSetupComplete {
                 controls
+            } else {
+                setupRequired
             }
 
             if let routeMessage = controller.routeTransitionMessage {
@@ -59,7 +62,13 @@ struct MenuBarRootView: View {
         .frame(width: 460)
         .fixedSize(horizontal: false, vertical: true)
         .sheet(isPresented: $showingSettings) {
-            SettingsView(controller: controller)
+            SettingsView(
+                controller: controller,
+                onOpenOnboarding: {
+                    showingSettings = false
+                    onOpenOnboarding()
+                }
+            )
         }
         .onChange(of: showingDiagnostics) {
             onPreferredSizeChange()
@@ -99,6 +108,23 @@ struct MenuBarRootView: View {
                 }
             }
         }
+    }
+
+    private var setupRequired: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Finish setup before recording", systemImage: "checklist")
+                .font(.headline)
+            Text("MeetingNotes needs Microphone and Screen & System Audio Recording access.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Finish Setup") {
+                onOpenOnboarding()
+            }
+            .buttonStyle(.borderedProminent)
+        }
+        .padding(12)
+        .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 10))
     }
 
 }

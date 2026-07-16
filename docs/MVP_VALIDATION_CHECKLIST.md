@@ -19,10 +19,13 @@ Use this checklist for every manual MVP validation pass. Record results in `docs
 - [ ] Confirm `MeetingNotes` appears in the menu bar.
 - [ ] Open MeetingNotes settings and confirm the OpenAI API key is saved.
 - [ ] Confirm output folder is set, usually `~/Documents/MeetingNotes/`.
-- [ ] Confirm microphone permission is granted when prompted.
-- [ ] Confirm System Audio Recording Only permission is enabled for `MeetingNotes`.
-- [ ] If diagnostics show ScreenCaptureKit fallback, confirm Screen & System Audio Recording permission is enabled for `MeetingNotes`.
-- [ ] For shortcut tests, confirm Accessibility permission is trusted in MeetingNotes diagnostics.
+- [ ] Confirm the first-launch onboarding window opens automatically.
+- [ ] Confirm microphone permission is granted from the onboarding flow.
+- [ ] Confirm Screen & System Audio Recording permission is enabled for `MeetingNotes`; ScreenCaptureKit is the only automatic system-audio backend.
+- [ ] Confirm onboarding requires a restart after system-audio access is requested.
+- [ ] Confirm the restarted app verifies both permissions and reaches the Ready screen.
+- [ ] Confirm recording is blocked with a Finish Setup action if either permission is revoked.
+- [ ] No camera or Accessibility permission is required for audio capture.
 - [ ] Confirm the Debug section is visible and diagnostics can be copied.
 - [ ] Clear diagnostics before each scenario unless the test requires preserving prior state.
 
@@ -143,20 +146,29 @@ Result:
 Purpose: validate common meeting-app capture.
 
 Setup:
-- Join a Zoom test meeting or call.
-- Confirm remote participant/audio is audible through the Mac.
+- Use a Zoom test meeting or call with remote audio available.
+- Run both startup-order passes below.
 
-Steps:
+Pass A — MeetingNotes first:
 - [ ] Clear diagnostics.
-- [ ] Start recording.
-- [ ] Speak locally.
-- [ ] Play or receive remote audio.
-- [ ] Stop recording.
-- [ ] Wait for processing to complete.
+- [ ] Start recording in MeetingNotes.
+- [ ] Open or join Zoom.
+- [ ] Confirm Zoom microphone and speaker controls work normally.
+- [ ] Speak locally and play or receive remote audio.
+- [ ] Stop recording and wait for processing to complete.
+
+Pass B — Zoom first:
+- [ ] Clear diagnostics.
+- [ ] Open or join Zoom.
+- [ ] Start recording in MeetingNotes.
+- [ ] Confirm Zoom microphone and speaker controls work normally.
+- [ ] Speak locally and play or receive remote audio.
+- [ ] Stop recording and wait for processing to complete.
 
 Expected Markdown:
 - Local voice appears under `Microphone:`.
 - Remote meeting audio appears under `System Audio:` if routed through Mac output.
+- Diagnostics identify ScreenCaptureKit as the selected system-audio backend.
 
 Result:
 - Pass/Fail:

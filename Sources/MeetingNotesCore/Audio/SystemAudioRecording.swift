@@ -28,10 +28,6 @@ public enum SystemAudioRecorderFactory {
     public static func makePreferredRecorders() -> [SystemAudioRecording] {
         var recorders: [SystemAudioRecording] = []
 
-        if #available(macOS 14.2, *) {
-            recorders.append(CoreAudioTapSystemAudioRecorder())
-        }
-
         if #available(macOS 13.0, *) {
             recorders.append(SystemAudioRecorder())
         }
@@ -41,10 +37,6 @@ public enum SystemAudioRecorderFactory {
 
     public static var preferredBackendNames: [String] {
         var names: [String] = []
-
-        if #available(macOS 14.2, *) {
-            names.append(SystemAudioBackend.coreAudioTap.rawValue)
-        }
 
         if #available(macOS 13.0, *) {
             names.append(SystemAudioBackend.screenCaptureKit.rawValue)

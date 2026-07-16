@@ -19,6 +19,7 @@ public final class MeetingNotesController: ObservableObject {
     @Published public private(set) var latestOutputURL: URL?
     @Published public private(set) var latestRawTranscriptURL: URL?
     @Published public private(set) var routeTransitionMessage: String?
+    @Published public private(set) var permissionSnapshot: PermissionSnapshot
 
     /// Manages on-device Whisper and LLM models. Observe this in Settings for
     /// download state and actions.
@@ -26,8 +27,10 @@ public final class MeetingNotesController: ObservableObject {
 
     public let silenceDetected = PassthroughSubject<Void, Never>()
     public let processingFailed = PassthroughSubject<ProcessingFailure, Never>()
+    public let onboardingRequested = PassthroughSubject<Void, Never>()
 
     private let settingsStore: SettingsStore
+    private let permissionService: PermissionServicing
     private let audioCaptureService: DualAudioCaptureService
     private let markdownExporter: MarkdownExporter
     private var processingProvider: ProcessingProvider
@@ -40,14 +43,27 @@ public final class MeetingNotesController: ObservableObject {
 
     public init(
         settingsStore: SettingsStore = SettingsStore(),
+        permissionService: PermissionServicing = SystemPermissionService(),
         audioCaptureService: DualAudioCaptureService = DualAudioCaptureService(),
         markdownExporter: MarkdownExporter = MarkdownExporter(),
         processingProvider: ProcessingProvider? = nil
     ) {
         self.settingsStore = settingsStore
+        self.permissionService = permissionService
         self.audioCaptureService = audioCaptureService
         self.markdownExporter = markdownExporter
-        let loadedSettings = settingsStore.load()
+        var loadedSettings = settingsStore.load()
+        if loadedSettings.isAwaitingScreenCaptureRelaunch {
+            loadedSettings.isAwaitingScreenCaptureRelaunch = false
+            settingsStore.save(loadedSettings)
+        }
+        self.permissionSnapshot = PermissionSnapshot(
+            microphone: permissionService.microphoneState(),
+            screenCapture: permissionService.screenCaptureState(
+                hasRequestedAccess: loadedSettings.hasRequestedScreenCapturePermission,
+                isAwaitingRelaunch: loadedSettings.isAwaitingScreenCaptureRelaunch
+            )
+        )
         self.settings = loadedSettings
         let manager = LocalModelManager()
         self.localModelManager = manager
@@ -65,6 +81,12 @@ public final class MeetingNotesController: ObservableObject {
             self.reportRecoverableRecordings()
         }
         manager.checkDownloadStatus(whisperModel: loadedSettings.whisperModel, mlxModelID: loadedSettings.localLLMModel)
+    }
+
+    public var isSetupComplete: Bool {
+        settings.hasAcceptedConsentChecklist
+            && settings.hasCompletedOnboarding
+            && permissionSnapshot.isReady
     }
 
     @MainActor private func handleRouteTransition(
@@ -123,6 +145,54 @@ public final class MeetingNotesController: ObservableObject {
         addDiagnostic("Consent checklist accepted.")
     }
 
+    @MainActor public func refreshPermissionStatus() {
+        permissionSnapshot = PermissionSnapshot(
+            microphone: permissionService.microphoneState(),
+            screenCapture: permissionService.screenCaptureState(
+                hasRequestedAccess: settings.hasRequestedScreenCapturePermission,
+                isAwaitingRelaunch: settings.isAwaitingScreenCaptureRelaunch
+            )
+        )
+    }
+
+    @MainActor public func requestMicrophoneAccess() async {
+        _ = await permissionService.requestMicrophoneAccess()
+        refreshPermissionStatus()
+        addDiagnostic("Microphone permission status: \(permissionSnapshot.microphone.rawValue).")
+    }
+
+    @MainActor public func requestScreenCaptureAccess() {
+        _ = permissionService.requestScreenCaptureAccess()
+        var updated = settings
+        updated.hasRequestedScreenCapturePermission = true
+        updated.isAwaitingScreenCaptureRelaunch = true
+        updated.hasCompletedOnboarding = false
+        updateSettings(updated)
+        refreshPermissionStatus()
+        addDiagnostic("Screen capture permission requested; app relaunch required.")
+    }
+
+    @MainActor public func openMicrophoneSettings() {
+        permissionService.openMicrophoneSettings()
+    }
+
+    @MainActor public func openScreenCaptureSettings() {
+        permissionService.openScreenCaptureSettings()
+    }
+
+    @MainActor public func completeOnboarding() {
+        refreshPermissionStatus()
+        guard settings.hasAcceptedConsentChecklist, permissionSnapshot.isReady else {
+            addDiagnostic("Onboarding completion blocked because permissions are incomplete.", level: .warning)
+            return
+        }
+        var updated = settings
+        updated.hasCompletedOnboarding = true
+        updated.isAwaitingScreenCaptureRelaunch = false
+        updateSettings(updated)
+        addDiagnostic("Permission onboarding completed.")
+    }
+
     @MainActor public func toggleRecording() {
         if state.isRecording {
             stopRecording()
@@ -138,8 +208,11 @@ public final class MeetingNotesController: ObservableObject {
             return
         }
 
-        guard settings.hasAcceptedConsentChecklist else {
-            setState(.failed("Please accept the recording consent checklist before starting."))
+        refreshPermissionStatus()
+        guard isSetupComplete else {
+            lastError = "Finish setup and grant Microphone and Screen & System Audio Recording access before starting."
+            addDiagnostic(lastError ?? "Permission setup required.", level: .warning)
+            onboardingRequested.send()
             return
         }
 
@@ -465,6 +538,9 @@ public final class MeetingNotesController: ObservableObject {
         Processing mode: \(settings.processingMode.rawValue)
         Summary depth: \(settings.summaryDepth.rawValue)
         Silence prompt after: \(Int(settings.inactivityTimeoutSeconds))s
+        Onboarding complete: \(settings.hasCompletedOnboarding)
+        Microphone permission: \(permissionSnapshot.microphone.rawValue)
+        Screen & system audio permission: \(permissionSnapshot.screenCapture.rawValue)
         Last error: \(error)
         Persistent log: \(PersistentDiagnosticLog.shared.logURL.path)
         Crash reports: \(CrashLogManager.shared.reportDirectoryURL.path)

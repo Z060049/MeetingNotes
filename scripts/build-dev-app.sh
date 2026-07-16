@@ -99,10 +99,8 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
     <true/>
     <key>NSMicrophoneUsageDescription</key>
     <string>MeetingNotes records your microphone to create meeting transcripts and notes.</string>
-    <key>NSAudioCaptureUsageDescription</key>
-    <string>MeetingNotes captures system audio to transcribe meeting participants and remote speakers.</string>
     <key>NSScreenCaptureUsageDescription</key>
-    <string>MeetingNotes may use screen capture as a temporary fallback for system audio recording during development.</string>
+    <string>MeetingNotes captures system audio to transcribe meeting participants and remote speakers. Screen video is not saved.</string>
 </dict>
 </plist>
 PLIST

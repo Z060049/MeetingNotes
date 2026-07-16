@@ -108,6 +108,10 @@ On first launch, grant the following permissions when prompted:
 | Microphone | Capture your voice |
 | Screen & System Audio Recording | Capture audio from Zoom, Meet, Teams, or any other app |
 
+MeetingNotes opens a guided setup window on first launch. Enable Microphone access first, then enable MeetingNotes under **System Settings → Privacy & Security → Screen & System Audio Recording**. macOS requires MeetingNotes to restart after the second permission is enabled; the setup window provides a restart button and verifies access on the next launch.
+
+Only these two permissions are required. MeetingNotes does not request Camera, Accessibility, or System Audio Recording Only access.
+
 Recording is started and stopped from the menu bar.
 
 ## Settings

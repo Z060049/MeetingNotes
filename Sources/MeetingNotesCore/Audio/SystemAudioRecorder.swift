@@ -13,8 +13,19 @@ public final class SystemAudioRecorder: NSObject, SystemAudioRecording, SCStream
     private var writerInput: AVAssetWriterInput?
     private var outputURL: URL?
     private var hasStartedSession = false
+    private let statsLock = NSLock()
+    private var buffersReceived = 0
+    private var framesReceived = 0
+    private var bytesReceived = 0
+    private var writeErrors = 0
 
     public var onAudioLevel: ((Float) -> Void)?
+
+    public var diagnosticSummary: String? {
+        statsLock.withLock {
+            "ScreenCaptureKit buffers: \(buffersReceived), frames: \(framesReceived), bytes: \(bytesReceived), write errors: \(writeErrors)"
+        }
+    }
 
     public func start(in directory: URL, filename: String = "system-audio.m4a") async throws -> URL {
         guard stream == nil else {
@@ -63,14 +74,21 @@ public final class SystemAudioRecorder: NSObject, SystemAudioRecording, SCStream
 
         let stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
         try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: queue)
-        try await stream.startCapture()
 
         self.stream = stream
         self.writer = writer
         self.writerInput = writerInput
         self.outputURL = url
         self.hasStartedSession = false
-        return url
+        resetStats()
+
+        do {
+            try await stream.startCapture()
+            return url
+        } catch {
+            clearState()
+            throw error
+        }
     }
 
     public func stop() async throws -> URL {
@@ -87,11 +105,7 @@ public final class SystemAudioRecorder: NSObject, SystemAudioRecording, SCStream
             await writer.finishWriting()
         }
 
-        self.stream = nil
-        self.writer = nil
-        self.writerInput = nil
-        self.outputURL = nil
-        self.hasStartedSession = false
+        clearState()
         return outputURL
     }
 
@@ -108,16 +122,60 @@ public final class SystemAudioRecorder: NSObject, SystemAudioRecording, SCStream
             return
         }
 
+        let frameCount = sampleBuffer.numSamples
+        let byteCount = sampleBuffer.dataBuffer.map(CMBlockBufferGetDataLength) ?? 0
+        recordBuffer(frameCount: frameCount, byteCount: byteCount, writeFailed: false)
+
         if writer.status == .unknown {
-            writer.startWriting()
+            guard writer.startWriting() else {
+                recordWriteError()
+                return
+            }
             writer.startSession(atSourceTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
             hasStartedSession = true
         }
 
         if writer.status == .writing, writerInput.isReadyForMoreMediaData {
-            writerInput.append(sampleBuffer)
-            onAudioLevel?(sampleBuffer.estimatedAudioLevel)
+            if writerInput.append(sampleBuffer) {
+                onAudioLevel?(sampleBuffer.estimatedAudioLevel)
+            } else {
+                recordWriteError()
+            }
         }
+    }
+
+    private func resetStats() {
+        statsLock.withLock {
+            buffersReceived = 0
+            framesReceived = 0
+            bytesReceived = 0
+            writeErrors = 0
+        }
+    }
+
+    private func recordBuffer(frameCount: Int, byteCount: Int, writeFailed: Bool) {
+        statsLock.withLock {
+            buffersReceived += 1
+            framesReceived += frameCount
+            bytesReceived += byteCount
+            if writeFailed {
+                writeErrors += 1
+            }
+        }
+    }
+
+    private func recordWriteError() {
+        statsLock.withLock {
+            writeErrors += 1
+        }
+    }
+
+    private func clearState() {
+        stream = nil
+        writer = nil
+        writerInput = nil
+        outputURL = nil
+        hasStartedSession = false
     }
 }
 
