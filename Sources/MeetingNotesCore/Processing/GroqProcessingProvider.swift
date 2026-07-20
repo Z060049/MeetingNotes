@@ -10,14 +10,25 @@ public final class GroqProcessingProvider: ProcessingProvider, @unchecked Sendab
 
     public init(
         apiKeyProvider: @escaping @Sendable () throws -> String?,
-        session: URLSession = .shared,
+        session: URLSession? = nil,
         transcriptionModel: String = "whisper-large-v3-turbo",
         summaryModel: String = "openai/gpt-oss-20b"
     ) {
         self.apiKeyProvider = apiKeyProvider
-        self.session = session
+        self.session = session ?? Self.makeDefaultSession()
         self.transcriptionModel = transcriptionModel
         self.summaryModel = summaryModel
+    }
+
+    /// Transcribing long meetings can keep the connection open for minutes while
+    /// the server processes audio. `URLSession.shared`'s 60s request timeout is
+    /// far too short and silently fails long recordings, so use generous limits.
+    private static func makeDefaultSession() -> URLSession {
+        let configuration = URLSessionConfiguration.default
+        configuration.timeoutIntervalForRequest = 300
+        configuration.timeoutIntervalForResource = 1_800
+        configuration.waitsForConnectivity = true
+        return URLSession(configuration: configuration)
     }
 
     public func process(
@@ -102,20 +113,32 @@ public final class GroqProcessingProvider: ProcessingProvider, @unchecked Sendab
             }
 
             let trimmedAudio = try? AudioLevelAnalyzer.trimmedSilence(url: file.url)
-            let uploadURL = trimmedAudio?.url ?? file.url
-            let timelineOffset = file.captureStartOffset + (trimmedAudio?.startOffset ?? 0)
+            let sourceURL = trimmedAudio?.url ?? file.url
+            let baseOffset = file.captureStartOffset + (trimmedAudio?.startOffset ?? 0)
             defer {
-                if uploadURL != file.url {
-                    try? FileManager.default.removeItem(at: uploadURL)
+                if sourceURL != file.url {
+                    try? FileManager.default.removeItem(at: sourceURL)
                 }
             }
 
-            let response = try await transcribe(fileURL: uploadURL, apiKey: apiKey)
-            segments.append(contentsOf: Self.transcriptSegments(
-                from: response,
-                source: file.source,
-                timelineOffset: timelineOffset
-            ))
+            // Downsample and split into upload-sized chunks so long meetings do
+            // not exceed the API's file-size limit or upload timeout.
+            let chunks = (try? TranscriptionUploadPreparer.prepareChunks(from: sourceURL))
+                ?? [PreparedTranscriptionAudio(url: sourceURL, startOffset: 0, isTemporary: false)]
+            defer {
+                for chunk in chunks where chunk.isTemporary {
+                    try? FileManager.default.removeItem(at: chunk.url)
+                }
+            }
+
+            for chunk in chunks {
+                let response = try await transcribe(fileURL: chunk.url, apiKey: apiKey)
+                segments.append(contentsOf: Self.transcriptSegments(
+                    from: response,
+                    source: file.source,
+                    timelineOffset: baseOffset + chunk.startOffset
+                ))
+            }
         }
 
         return Transcript(segments: segments)

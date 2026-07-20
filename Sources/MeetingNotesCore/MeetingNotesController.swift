@@ -376,9 +376,14 @@ public final class MeetingNotesController: ObservableObject {
         // after process() returns.
         // We use an actor-isolated box so the closure can write it safely.
         let titleBox = TitleBox()
+        // Tracks whether transcription actually produced a transcript. If it did
+        // not (e.g. the transcription request failed), we must preserve the audio
+        // instead of writing an empty note and deleting the recording.
+        let transcriptProduced = FlagBox()
 
         let onTranscriptReady: @Sendable (Transcript) async -> Void = { [weak self] transcript in
             guard let self else { return }
+            await transcriptProduced.set()
 
             // 1. Generate a short title (~4–6 words, 40 token cap).
             let shortTitle: String
@@ -436,9 +441,17 @@ public final class MeetingNotesController: ObservableObject {
                 )
                 addDiagnostic("Processing complete. Exporting summary Markdown.")
             } catch {
-                // Summarization or model-load failed. If we have a raw transcript
-                // on disk (written by onTranscriptReady), produce a minimal summary
-                // file so the user always gets both files.
+                // If transcription never produced a transcript, this is a
+                // transcription failure (e.g. the request timed out or the audio
+                // was rejected). Re-throw so the outer handler preserves the audio
+                // instead of writing an empty note and deleting the recording.
+                guard await transcriptProduced.value else {
+                    throw error
+                }
+
+                // Summarization or model-load failed, but the raw transcript is
+                // already on disk (written by onTranscriptReady). Produce a minimal
+                // summary file so the user always gets both files.
                 let shortTitle = await titleBox.value ?? "recording"
                 let base = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                 addDiagnostic("Summarization failed (\(base)). Writing minimal summary file.", level: .warning)
@@ -505,6 +518,12 @@ public final class MeetingNotesController: ObservableObject {
     private actor TitleBox {
         private(set) var value: String?
         func set(_ v: String) { value = v }
+    }
+
+    /// A simple actor-isolated boolean flag settable from a `Sendable` closure.
+    private actor FlagBox {
+        private(set) var value = false
+        func set() { value = true }
     }
 
     private func preserveUnprocessedAudio(_ capture: AudioCaptureResult) -> URL? {
