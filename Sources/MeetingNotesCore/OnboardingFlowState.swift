@@ -22,7 +22,7 @@ public struct OnboardingFlowState: Equatable, Sendable {
             step = .restart
         } else if !settings.hasAcceptedConsentChecklist {
             step = .welcome
-        } else if !settings.hasSelectedProcessingMode || !isProcessingReady {
+        } else if !isProcessingReady {
             step = .processing
         } else if !permissions.microphone.isAuthorized {
             step = .microphone

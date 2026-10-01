@@ -29,8 +29,6 @@ final class OnboardingFlowTests: XCTestCase {
         )
         XCTAssertEqual(microphoneFlow.step, .processing)
 
-        settings.hasSelectedProcessingMode = true
-
         let systemAudioFlow = OnboardingFlowState(
             settings: settings,
             permissions: PermissionSnapshot(
@@ -62,7 +60,6 @@ final class OnboardingFlowTests: XCTestCase {
     func testGrantedPermissionsResumeAtReady() {
         var settings = AppSettings()
         settings.hasAcceptedConsentChecklist = true
-        settings.hasSelectedProcessingMode = true
 
         let flow = OnboardingFlowState(
             settings: settings,
@@ -76,10 +73,9 @@ final class OnboardingFlowTests: XCTestCase {
         XCTAssertEqual(flow.step, .ready)
     }
 
-    func testSelectedModeResumesAtProcessingUntilItsSetupIsReady() {
+    func testMissingGroqKeyResumesAtProcessing() {
         var settings = AppSettings()
         settings.hasAcceptedConsentChecklist = true
-        settings.hasSelectedProcessingMode = true
 
         let flow = OnboardingFlowState(
             settings: settings,
@@ -142,10 +138,8 @@ final class OnboardingFlowTests: XCTestCase {
         let store = SettingsStore(defaults: defaults)
         store.save(
             AppSettings(
-                processingMode: .api,
                 hasAcceptedConsentChecklist: true,
-                hasCompletedOnboarding: true,
-                hasSelectedProcessingMode: true
+                hasCompletedOnboarding: true
             )
         )
         let credentials = FakeCredentialStore()
@@ -172,7 +166,6 @@ final class OnboardingFlowTests: XCTestCase {
         store.save(
             AppSettings(
                 hasAcceptedConsentChecklist: true,
-                hasSelectedProcessingMode: true,
                 hasRequestedScreenCapturePermission: true,
                 isAwaitingScreenCaptureRelaunch: true
             )

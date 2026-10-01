@@ -258,7 +258,7 @@ final class AudioHotSwapTests: XCTestCase {
     private func session(directory: URL) -> RecordingSession {
         RecordingSession(
             startedAt: Date().addingTimeInterval(-1),
-            processingMode: .local,
+            processingMode: .api,
             outputDirectory: directory,
             temporaryDirectory: directory
         )

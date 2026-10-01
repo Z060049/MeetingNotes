@@ -5,17 +5,19 @@ import SwiftUI
 struct MenuBarRootView: View {
     @ObservedObject var controller: MeetingNotesController
     private let onOpenOnboarding: () -> Void
+    private let onOpenSettings: () -> Void
     private let onPreferredSizeChange: () -> Void
-    @State private var showingSettings = false
     @State private var showingDiagnostics = false
 
     init(
         controller: MeetingNotesController,
         onOpenOnboarding: @escaping () -> Void = {},
+        onOpenSettings: @escaping () -> Void = {},
         onPreferredSizeChange: @escaping () -> Void = {}
     ) {
         _controller = ObservedObject(wrappedValue: controller)
         self.onOpenOnboarding = onOpenOnboarding
+        self.onOpenSettings = onOpenSettings
         self.onPreferredSizeChange = onPreferredSizeChange
     }
 
@@ -46,7 +48,7 @@ struct MenuBarRootView: View {
             Divider()
 
             Button("Settings") {
-                showingSettings = true
+                onOpenSettings()
             }
 
             DisclosureGroup("Debug", isExpanded: $showingDiagnostics) {
@@ -61,15 +63,6 @@ struct MenuBarRootView: View {
         .padding()
         .frame(width: 460)
         .fixedSize(horizontal: false, vertical: true)
-        .sheet(isPresented: $showingSettings) {
-            SettingsView(
-                controller: controller,
-                onOpenOnboarding: {
-                    showingSettings = false
-                    onOpenOnboarding()
-                }
-            )
-        }
         .onChange(of: showingDiagnostics) {
             onPreferredSizeChange()
         }
@@ -114,7 +107,7 @@ struct MenuBarRootView: View {
         VStack(alignment: .leading, spacing: 10) {
             Label("Finish setup before recording", systemImage: "checklist")
                 .font(.headline)
-            Text("Choose a processing mode, finish its setup, and grant Microphone and Screen & System Audio Recording access.")
+            Text("Add a Groq API key and grant Microphone access. System audio access is optional.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

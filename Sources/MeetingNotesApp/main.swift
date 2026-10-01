@@ -9,8 +9,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
     private var popoverHostingController: NSHostingController<MenuBarRootView>?
-    private var outsideClickMonitor: Any?
     private var onboardingWindowController: OnboardingWindowController?
+    private var settingsWindowController: SettingsWindowController?
     private var cancellables = Set<AnyCancellable>()
     private var isShowingSilenceAlert = false
     private var isShowingProcessingAlert = false
@@ -34,6 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         configureStatusItem()
         configurePopover()
         configureOnboarding()
+        configureSettings()
         bindState()
         bindPopoverContentSize()
         bindSilencePrompt()
@@ -70,7 +71,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        stopOutsideClickMonitor()
         PersistentDiagnosticLog.shared.log("Application will terminate normally.")
         if let incidentURL = CrashLogManager.shared.markCleanShutdown(finalState: controller.state.title) {
             PersistentDiagnosticLog.shared.log(
@@ -126,6 +126,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 onOpenOnboarding: { [weak self] in
                     self?.presentOnboarding()
                 },
+                onOpenSettings: { [weak self] in
+                    self?.presentSettings()
+                },
                 onPreferredSizeChange: { [weak self] in
                     Task { @MainActor [weak self] in
                         self?.resizePopoverToFit()
@@ -147,45 +150,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         closePopover()
     }
 
-    func popoverDidClose(_ notification: Notification) {
-        stopOutsideClickMonitor()
-    }
-
     private func closePopover() {
         guard popover?.isShown == true else {
             return
         }
         PersistentDiagnosticLog.shared.log("Closing menu-bar popover.")
         popover?.performClose(nil)
-    }
-
-    private func startOutsideClickMonitor() {
-        guard outsideClickMonitor == nil else {
-            return
-        }
-
-        // Status-item popovers do not reliably receive AppKit transient dismissal
-        // when the user clicks another menu-bar app. Monitor mouse-downs delivered
-        // to other apps while ours is shown.
-        PersistentDiagnosticLog.shared.log("Started outside-click monitor for menu-bar popover.")
-        outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(
-            matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                PersistentDiagnosticLog.shared.log(
-                    "Outside mouse-down received; dismissing menu-bar popover."
-                )
-                self?.closePopover()
-            }
-        }
-    }
-
-    private func stopOutsideClickMonitor() {
-        guard let outsideClickMonitor else {
-            return
-        }
-        NSEvent.removeMonitor(outsideClickMonitor)
-        self.outsideClickMonitor = nil
     }
 
     private func configureOnboarding() {
@@ -198,9 +168,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             .store(in: &cancellables)
     }
 
+    private func configureSettings() {
+        settingsWindowController = SettingsWindowController(
+            controller: controller,
+            onOpenOnboarding: { [weak self] in
+                self?.presentOnboarding()
+            }
+        )
+    }
+
     private func presentOnboarding() {
+        PersistentDiagnosticLog.shared.log("Onboarding presentation requested from the menu-bar UI.")
         closePopover()
         onboardingWindowController?.present()
+    }
+
+    private func presentSettings() {
+        PersistentDiagnosticLog.shared.log("Settings presentation requested from the menu-bar UI.")
+        closePopover()
+        settingsWindowController?.present()
     }
 
     private func bindPermissionRefresh() {
@@ -422,7 +408,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             // full-screen focus frame after dismiss; FreeFlow-style menus avoid
             // that by not stealing activation.
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            startOutsideClickMonitor()
             PersistentDiagnosticLog.shared.log(
                 "Menu-bar popover shown (isShown=\(popover.isShown))."
             )

@@ -1,8 +1,10 @@
 # MeetingNotes PRD
 
+> **Current product scope (Sep 19, 2026):** MeetingNotes uses Groq API transcription only and creates one unmodified raw transcript Markdown file per recording. Local processing, LLM summarization, AI title generation, action-item extraction, and a second notes file have been removed. This decision supersedes older roadmap discussion below where those features are still described historically.
+
 ## 1) Product overview
 
-MeetingNotes is a macOS background app that captures both sides of a conversation (microphone + system audio), transcribes it, and outputs clean notes as Markdown.
+MeetingNotes is a macOS background app that captures both sides of a conversation (microphone + system audio), transcribes them with Groq, and outputs one raw transcript as Markdown.
 
 It is designed for real-world meeting workflows where built-in recording is unavailable or restricted (Zoom, Google Meet/Hangouts, Microsoft Teams, phone calls via MacBook audio).
 
@@ -10,7 +12,7 @@ Core value:
 
 - Universal capture independent of meeting platform
 - Fast, searchable Markdown output for Obsidian or any notes app
-- Optional privacy-first local processing mode
+- A simple transcript-only pipeline without generated summaries
 
 ## Current implementation status
 
@@ -20,8 +22,8 @@ Status as of Jul 12, 2026:
 - The app currently runs as a local development `.app` bundle built from Swift Package Manager.
 - Manual menu-bar recording works for the tested happy path.
 - Microphone and system audio are captured into separate temporary files.
-- Groq API mode can transcribe, summarize, and export Markdown successfully.
-- Local transcription with WhisperKit and local summarization with Foundation Models or MLX have been implemented and tested end-to-end.
+- Groq API mode transcribes recordings with `whisper-large-v3-turbo`.
+- Local transcription and all summarization code have been removed.
 - Markdown output has been validated with a short real recording and saved to `~/Documents/MeetingNotes/`.
 - Broader reliability testing, UX simplification, and production packaging remain outstanding.
 
@@ -34,7 +36,7 @@ Current development workflow:
 
 Validated output example:
 
-- A short recording successfully generated a Markdown file with metadata, summary sections, and separate `Microphone` / `System Audio` transcript sections.
+- A recording generates one `_recording_transcript.md` file with metadata and separate `Microphone` / `System Audio` sections.
 
 ## 2) Problem statement
 
@@ -44,7 +46,7 @@ People regularly lose important meeting details because:
 - Notes are incomplete while multitasking in live calls
 - Existing tools are tied to specific meeting platforms
 
-Users need a single Mac-native tool that works everywhere, starts/stops quickly, and produces reliable transcript + summary output without workflow friction.
+Users need a single Mac-native tool that works everywhere, starts/stops quickly, and produces a reliable raw transcript without workflow friction.
 
 ## 3) Goals and non-goals
 
@@ -56,18 +58,14 @@ Users need a single Mac-native tool that works everywhere, starts/stops quickly,
   - Local microphone input (user speech)
   - System/output audio (remote speaker audio from meeting app)
 - Auto-stop when inactive for 5 minutes (configurable)
-- Generate:
-  - Full transcript in Markdown
-  - Structured summary in Markdown
-- Support two processing modes:
-  - Local LLM/STT path (privacy-first, no API cost)
-  - Third-party API path (simpler to ship first)
+- Generate one unmodified raw transcript in Markdown
+- Use Groq API transcription only
 
 ### Implementation choices made for MVP
 
 - App stack: native macOS Swift/SwiftUI menu-bar app.
 - Packaging during development: Swift Package Manager executable wrapped into a local `.app` bundle.
-- API provider: Groq for speech-to-text and summarization.
+- API provider: Groq for speech-to-text only.
 - API key storage: macOS Keychain.
 - Audio capture strategy:
   - Microphone: AVFoundation recording to `.wav`.
@@ -87,16 +85,16 @@ Users need a single Mac-native tool that works everywhere, starts/stops quickly,
 - Job seekers and interviewers
 - Founders and operators in frequent remote meetings
 - Consultants, PMs, engineers, and researchers
-- Privacy-sensitive users who prefer local processing
+- Users who want a simple cross-platform-meeting transcript
 
 ## 5) User stories
 
 - As a user, I can start recording from anywhere using a global shortcut without opening a full app window.
+- As a user, I can pause and resume an active recording without ending the meeting session.
 - As a user, I can capture both my voice and the other participant audio regardless of meeting platform.
-- As a user, I receive a readable Markdown file with transcript and concise summary immediately after the meeting.
+- As a user, I receive one raw Markdown transcript immediately after the meeting.
 - As a user, I can rely on auto-stop if I forget to manually stop recording.
-- As a privacy-focused user, I can keep processing fully local on my device.
-- As a convenience-focused user, I can choose cloud/API processing for faster setup.
+- As a user, I can add my own Groq API key and keep it securely in Keychain.
 
 ## 6) Functional requirements
 
@@ -108,8 +106,14 @@ Users need a single Mac-native tool that works everywhere, starts/stops quickly,
 - Tray/menu bar presence with clear state:
   - Idle
   - Recording
+  - Paused
   - Processing
   - Complete
+- Pause/resume action from the menu bar:
+  - Pausing temporarily stops microphone and system-audio capture without processing or ending the session.
+  - Resuming appends new audio segments to the same recording and preserves transcript timeline alignment.
+  - The inactivity timer is suspended while paused.
+  - The user can stop and process the recording while it is paused.
 - Manual stop action from menu bar
 - Auto-stop after 5 minutes of inactivity (no detected speech or audio above threshold)
 - Optional confirmation sound or toast on start/stop
@@ -122,33 +126,27 @@ Users need a single Mac-native tool that works everywhere, starts/stops quickly,
 - Handle device changes gracefully (mic unplug, audio route changes)
 - Store temporary audio safely, then clean up after processing
 
-### 6.3 Transcription + summarization
+### 6.3 Transcription
 
 - Transcribe meeting audio into diarized or speaker-labeled text where possible
 - For MVP, label transcript segments by capture source (`Microphone`, `System Audio`) rather than full speaker diarization.
-- Produce meeting summary with:
-  - Key points
-  - Decisions
-  - Action items
-  - Follow-ups/questions
-- Generate Markdown output with consistent template
+- Preserve Groq's unmodified transcript text without de-duplication or LLM cleanup.
+- Do not generate summaries, titles, decisions, action items, or follow-up questions.
 
 ### 6.4 File output
 
 - Save `.md` output to configurable folder (default: `~/Documents/MeetingNotes/`)
-- Filename format: `YYYY-MM-DD_HH-mm_<meeting-title-or-generic>.md`
+- Filename format: `YYYY-MM-DD_HH-mm_recording_transcript.md`
 - Include metadata header:
   - Date/time
   - Duration
-  - Processing mode (Local/API)
+  - Processing provider (API)
   - Audio sources captured
 
 ### 6.5 Settings
 
-- Toggle processing mode (Local vs API)
 - Configure inactivity timeout (default 5 min)
 - Configure output folder
-- Configure summary depth (brief/standard/detailed)
 - Configure consent reminder prompt before capture
 - Configure/store Groq API key securely via Keychain
 
@@ -165,12 +163,8 @@ Users need a single Mac-native tool that works everywhere, starts/stops quickly,
 - First-run consent/compliance checklist
 - First-run Accessibility permission guidance for global shortcut support
 - Clear indicator when recording is active
-- Local mode:
-  - Audio/transcript stays on device
-  - No network transfer for content processing
-- API mode:
-  - Disclose provider, retention behavior, and data handling
-  - Offer "do not store" where provider supports it
+- Disclose that captured audio is sent to Groq for transcription.
+- Store the user's Groq API key only in macOS Keychain.
 - Secure temporary file handling and deletion after processing
 - No background recording without explicit user start
 
@@ -217,19 +211,13 @@ Recommended for:
 Phase 1 (MVP, 4-8 weeks):
 
 - Implement stable dual-source recording
-- Ship API-based transcription + summary
+- Ship Groq API transcription
 - Deliver Markdown export and core settings
 
 Phase 2:
 
-- Improve speaker labeling, summary quality, and reliability
-- Add better post-meeting structure templates
-
-Phase 3:
-
-- Introduce local processing beta mode
-- Benchmark accuracy/speed/cost vs API mode
-- Promote privacy-first value in product messaging
+- Improve speaker labeling and transcription reliability
+- Improve long-recording chunking and progress feedback
 
 ## 11) Success metrics
 
@@ -240,7 +228,6 @@ Phase 3:
   - Crash-free sessions
 - Output quality:
   - User rating for transcript usefulness
-  - User rating for summary usefulness
 - Engagement:
   - Weekly recordings per active user
 - Business:
@@ -255,8 +242,6 @@ Phase 3:
   - Mitigation: first-run onboarding, settings deep links, refresh status, and clear manual fallback
 - Legal/compliance concerns
   - Mitigation: strong consent UX + jurisdiction reminders
-- Summary hallucinations or missed context
-  - Mitigation: keep transcript + summary side-by-side, improve prompts/models
 - Transcription hallucinations on silent or near-empty audio
   - Mitigation: skip tiny system-audio files before sending to STT; add stronger silence detection in a future pass
 - High latency for long recordings
@@ -421,8 +406,7 @@ Done when a new user can download, install, configure, and complete a meeting wi
 - Is "double Command" the final shortcut, or should users configure any global hotkey after MVP?
 - Should we store raw audio long-term or delete by default after transcript generation?
 - Do we require speaker diarization in MVP or treat it as best-effort?
-- Which Groq transcription/summarization models should be used for cost/quality tuning?
-- What minimum Mac hardware should local mode officially support?
+- Which Groq transcription model should be used for cost/quality tuning?
 - What is the right production onboarding copy for Accessibility, microphone, and system audio permissions?
 
 ## 14) MVP definition (ship criteria)
@@ -432,8 +416,8 @@ MeetingNotes MVP is ready when:
 - User can start/stop recording from global shortcut or menu bar
 - App reliably captures mic + system audio in common meeting apps
 - App auto-stops after configurable inactivity timeout
-- Transcript + summary Markdown file is generated and saved successfully
-- User can choose API mode and complete processing end-to-end
+- One raw transcript Markdown file is generated and saved successfully
+- User can configure a Groq API key and complete transcription end-to-end
 - Basic compliance warning and recording-state visibility are in place
 
 ## 15) Distribution and go-to-market recommendation
@@ -442,17 +426,16 @@ This section captures the recommended path for distributing and marketing Meetin
 
 ### 15.1 Key constraint
 
-The processing pipeline splits into two very different steps, and they should not be treated the same way:
+The processing pipeline contains one cloud step:
 
-- Transcription (audio to text) is the expensive, high-volume step and requires a speech model (Groq-hosted Whisper in API mode). Anthropic/Claude has no speech-to-text API, and "Codex" is a coding agent, not a transcription service.
-- Summarization (text to notes) is cheap and provider-agnostic; Groq, Claude, Gemini, or a local model can all do it.
+- Transcription (audio to text) uses Groq-hosted Whisper. Anthropic/Claude has no speech-to-text API, and "Codex" is a coding agent, not a transcription service.
 
 Implication: "let users log in with Claude/Codex" does not map onto what the app does. There is also no consumer OAuth that lets a third-party app bill transcription against someone's ChatGPT or Claude subscription. The realistic bring-your-own-key (BYOK) flow is pasting a Groq API key.
 
 Therefore the prior decision before any distribution model is: where does transcription run?
 
 - Keep it on Groq-hosted Whisper (rate-limited free tier, mandatory key), or
-- Move it on-device (whisper.cpp, or Apple `SpeechTranscriber`/`SpeechAnalyzer` on macOS 26). On-device transcription is free, private, needs no key, and removes the biggest cost and liability driver. BYOK then only matters for the cheap summary step.
+- A future product decision could move transcription on-device, but local mode is not part of the current app.
 
 ### 15.2 Evaluation of the two distribution options
 
@@ -474,7 +457,7 @@ Option A — open source on GitHub, BYOK:
 
 - Use private testing to validate reliability and note quality before public distribution.
 - Do not embed a shared API key in a distributed app.
-- Prefer on-device transcription by default, with optional provider-swappable cloud summarization.
+- Keep the current Groq BYOK transcription flow explicit and simple.
 - Require a signed and notarized build before public distribution.
 - The authoritative execution sequence is maintained in Section 12.3.
 
@@ -484,8 +467,7 @@ Target hook once transcription is on-device: "On-device meeting notes for any Ma
 
 ### 15.5 Engineering prerequisites (shared by both paths)
 
-- Keep summarization providers swappable behind `ProcessingProvider`.
-- Maintain the on-device transcription path alongside the Groq provider.
+- Keep transcription behind `ProcessingProvider` so the Groq implementation remains testable.
 - Complete production packaging (signing/notarization) from Track 4 before public distribution.
 
 ### 15.6 Open go-to-market questions
@@ -652,11 +634,12 @@ This is a separate product with a separate codebase. Swift code cannot be reused
 | RAM         | 8 GB                | 16 GB (headroom for large models) |
 | Storage     | 1 GB free           | 2 GB (room for model upgrades)    |
 
-## 20. Processing Modes
+## 20. Transcription Provider
 
-### 20.1 Groq API processing
+### 20.1 Groq API transcription
 
-- Settings and onboarding expose Groq API (Recommended) and Local processing.
-- Local mode downloads required models during onboarding and keeps audio/transcripts on the Mac.
-- Groq API mode stores `GROQ_API_KEY` in macOS Keychain and sends audio/transcript text to Groq.
-- Groq's free tier is rate-limited; users can change modes later in Settings.
+- Settings and onboarding require a Groq API key.
+- The key is stored in macOS Keychain.
+- Captured audio is sent to Groq for transcription; transcript text is not sent to a chat-completion model.
+- Groq's free tier is rate-limited.
+- Each successful recording produces exactly one unmodified raw transcript Markdown file.

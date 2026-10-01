@@ -74,14 +74,4 @@ final class GroqTranscriptionResponseTests: XCTestCase {
         XCTAssertEqual(systemAudio.first?.startTime, 76)
     }
 
-    func testChatCompletionExtractsMessageContent() throws {
-        let response = Data("""
-        {"choices":[{"message":{"role":"assistant","content":"Meeting summary JSON"}}]}
-        """.utf8)
-
-        XCTAssertEqual(
-            try GroqProcessingProvider.decodeChatCompletionText(from: response),
-            "Meeting summary JSON"
-        )
-    }
 }

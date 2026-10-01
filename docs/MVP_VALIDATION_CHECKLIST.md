@@ -17,16 +17,15 @@ Use this checklist for every manual MVP validation pass. Record results in `docs
   ```
 
 - [ ] Confirm `MeetingNotes` appears in the menu bar.
-- [ ] Confirm onboarding defaults to Groq API (Recommended), links to Groq key creation, and offers Local as the alternative.
-- [ ] For Local, confirm required model downloads complete before Continue is enabled.
-- [ ] For Groq API, confirm a `GROQ_API_KEY` can be saved to macOS Keychain and no OpenAI key is requested.
+- [ ] Confirm onboarding links to Groq key creation and requires a `GROQ_API_KEY`.
+- [ ] Confirm the key is saved to macOS Keychain and no OpenAI key or local model is requested.
 - [ ] Confirm output folder is set, usually `~/Documents/MeetingNotes/`.
 - [ ] Confirm the first-launch onboarding window opens automatically.
 - [ ] Confirm microphone permission is granted from the onboarding flow.
 - [ ] Confirm Screen & System Audio Recording permission is enabled for `MeetingNotes`; ScreenCaptureKit is the only automatic system-audio backend.
 - [ ] Confirm onboarding requires a restart after system-audio access is requested.
 - [ ] Confirm the restarted app verifies processing setup and both permissions, then reaches the Ready screen.
-- [ ] Confirm recording is blocked with a Finish Setup action if a required model/key or either permission is missing.
+- [ ] Confirm recording is blocked with a Finish Setup action if the Groq key or microphone permission is missing.
 - [ ] No camera or Accessibility permission is required for audio capture.
 - [ ] Confirm the Debug section is visible and diagnostics can be copied.
 - [ ] Clear diagnostics before each scenario unless the test requires preserving prior state.
@@ -35,7 +34,7 @@ Use this checklist for every manual MVP validation pass. Record results in `docs
 
 A scenario passes when:
 - MeetingNotes reaches `Complete`.
-- A Markdown file is saved to the configured output folder.
+- Exactly one `_recording_transcript.md` file is saved to the configured output folder.
 - The Markdown metadata has the expected duration, processing mode, and audio sources.
 - Transcript content matches the expected source streams.
 - Diagnostics explain the path taken, including file sizes, stream transcription decisions, and output path.
@@ -70,7 +69,7 @@ Expected diagnostics:
 - `Microphone file size: ...`
 - `System Audio file size: ...`
 - `System Audio transcription skipped: ...` if the system stream is silent/tiny.
-- `Markdown saved to ...`
+- `Raw transcript saved to ...`
 
 Expected Markdown:
 - Transcript includes `Microphone:` with spoken text.
@@ -101,7 +100,7 @@ Steps:
 Expected diagnostics:
 - `System Audio file size: ...` shows a meaningful file size.
 - System audio is sent to transcription, not skipped.
-- `Markdown saved to ...`
+- `Raw transcript saved to ...`
 
 Expected Markdown:
 - Transcript includes `System Audio:` with content from browser playback.
@@ -131,12 +130,12 @@ Steps:
 Expected diagnostics:
 - Both microphone and system-audio file sizes are present.
 - Both streams are sent to transcription when non-silent.
-- `Markdown saved to ...`
+- `Raw transcript saved to ...`
 
 Expected Markdown:
 - Transcript includes `Microphone:` with local speech.
 - Transcript includes `System Audio:` with playback content.
-- Summary should mention the dominant test content without inventing decisions.
+- No summary or second notes file is generated.
 
 Result:
 - Pass/Fail:
@@ -275,16 +274,15 @@ Result:
 
 ## Scenario 9: Short Recording Under 30 Seconds
 
-Purpose: verify short recordings do not produce misleading summaries or fake decisions.
+Purpose: verify short recordings produce one raw transcript.
 
 Steps:
 - [ ] Record 5-20 seconds with a simple phrase.
 - [ ] Stop and process.
 
 Expected Markdown:
-- Summary is brief.
-- No fake decisions or action items.
 - Transcript is present.
+- No summary, decisions, or action-items sections are present.
 
 Result:
 - Pass/Fail:

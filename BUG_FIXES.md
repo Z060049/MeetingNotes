@@ -170,6 +170,63 @@ The relaunch helper successfully started a new MeetingNotes process, but macOS c
 
 Fix implemented; installed-DMG verification is still required.
 
+## Long recordings produce an empty note and lose the audio
+
+### Symptoms
+
+- A ~40-minute meeting recorded successfully (microphone and system-audio files were written), but the resulting note was empty ("No transcript was generated for this captured source").
+- The diagnostic log showed `Summarization failed (The request timed out.)` roughly 60 seconds after processing began, followed by `Temporary files cleaned up.`
+- The raw audio was no longer on disk afterward, so the recording could not be reprocessed.
+
+### Steps to reproduce
+
+1. Record a long meeting (tens of minutes) with API processing mode.
+2. Stop the recording and wait for processing.
+3. Observe an empty summary/transcript and, in the log, a timeout during processing.
+
+### Cause
+
+- Transcription uploaded each capture file in a single request using `URLSession.shared`, whose default 60-second request timeout is far too short for a long recording. The uncompressed microphone WAV (~116 MB for 40 minutes) also exceeded the hosted transcription API's upload size limit.
+- The error handler that catches processing failures was written for summarization errors. Because transcription runs first inside the same call, a transcription failure was mislabeled "Summarization failed," an empty note was written, and cleanup then deleted the raw audio — so the recording was lost.
+
+### Fix
+
+- Preserve the raw audio and surface the real error when transcription (as opposed to summarization) fails, instead of writing an empty note and deleting the recording. Failed recordings are kept in `~/Documents/MeetingNotes/<date>_unprocessed/`.
+- Downsample audio to 16 kHz mono AAC and split it into 20-minute chunks before upload, so long meetings stay well under the API file-size limit; transcript timestamps are stitched back onto the original timeline using each chunk's offset.
+- Give the Groq client a dedicated `URLSession` with a 300-second request timeout and 30-minute resource timeout instead of the 60-second shared default.
+- Added `TranscriptionUploadPreparer` with tests covering 16 kHz mono downsampling and the fallback path for unreadable input.
+
+### Status
+
+Fix implemented and unit-tested. End-to-end verification against the live transcription API with a long recording is still recommended.
+
+## Long transcripts exceed the Groq summarization token limit
+
+### Symptoms
+
+- A 32-minute API-mode recording produced a complete raw transcript, but the generated meeting note contained no summary.
+- The fallback meeting note also incorrectly said that no transcript was generated even though the raw transcript had been saved successfully.
+
+### Observed error
+
+Groq rejected the summary request for `openai/gpt-oss-20b` because the organization had an 8,000 tokens-per-minute limit and the request required 9,173 tokens.
+
+### Cause
+
+MeetingNotes sends the entire transcript to the summary model in one request and does not account for the active model, organization, and service tier's token limits. Groq limits can vary by model and account tier, so a fixed transcript-length threshold would not be reliable.
+
+### Proposed fix
+
+- Split long transcripts into bounded chunks, summarize each chunk, then merge the partial summaries into the final meeting summary.
+- Use Groq rate-limit response headers when available to adjust future request sizes, but do not depend on those headers being known before the first request.
+- If Groq still rejects a request as too large, automatically retry with smaller chunks.
+- Reserve enough of the token budget for the requested summary output.
+- When summarization fails after transcription succeeds, include the successful transcript in the main Markdown file instead of writing an empty transcript section.
+
+### Status
+
+Closed by product simplification on Sep 19, 2026. MeetingNotes no longer requests summaries or calls a chat-completion model; each recording now produces only the raw transcript file.
+
 ## Verification
 
 - Confirmed that audio remained available in Recording Recovery after terminating the stuck process.

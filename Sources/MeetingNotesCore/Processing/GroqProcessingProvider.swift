@@ -6,18 +6,15 @@ public final class GroqProcessingProvider: ProcessingProvider, @unchecked Sendab
     private let apiKeyProvider: @Sendable () throws -> String?
     private let session: URLSession
     private let transcriptionModel: String
-    private let summaryModel: String
 
     public init(
         apiKeyProvider: @escaping @Sendable () throws -> String?,
         session: URLSession? = nil,
-        transcriptionModel: String = "whisper-large-v3-turbo",
-        summaryModel: String = "openai/gpt-oss-20b"
+        transcriptionModel: String = "whisper-large-v3-turbo"
     ) {
         self.apiKeyProvider = apiKeyProvider
         self.session = session ?? Self.makeDefaultSession()
         self.transcriptionModel = transcriptionModel
-        self.summaryModel = summaryModel
     }
 
     /// Transcribing long meetings can keep the connection open for minutes while
@@ -31,80 +28,11 @@ public final class GroqProcessingProvider: ProcessingProvider, @unchecked Sendab
         return URLSession(configuration: configuration)
     }
 
-    public func process(
-        capture: AudioCaptureResult,
-        settings: AppSettings,
-        onTranscriptReady: (@Sendable (Transcript) async -> Void)? = nil
-    ) async throws -> ProcessingResult {
-        guard settings.processingMode == .api else {
-            throw ProcessingProviderError.unsupportedLocalMode
-        }
+    public func transcribe(capture: AudioCaptureResult) async throws -> Transcript {
         guard let apiKey = try apiKeyProvider(), !apiKey.isEmpty else {
             throw ProcessingProviderError.missingAPIKey
         }
 
-        let transcript = try await transcribe(capture: capture, apiKey: apiKey)
-        await onTranscriptReady?(transcript)
-
-        let deduplication = TranscriptDeduplicator.deduplicateWithReport(transcript)
-        let cleaned = TranscriptDeduplicator.collapseRepeatedSentences(deduplication.transcript)
-        let report = deduplication.report
-        PersistentDiagnosticLog.shared.log(
-            "Transcript deduplication: mic sentences \(report.microphoneSentencesBefore) → "
-                + "\(report.microphoneSentencesAfter), removed \(report.removedSentenceCount) "
-                + "(similarity: \(report.removedBySimilarity), coverage: \(report.removedByCoverage), "
-                + "embedded spans: \(report.removedEmbeddedSpans)); affected mic segments: "
-                + "\(report.affectedMicrophoneSegmentIndices)."
-        )
-
-        let summary = try await summarize(transcript: cleaned, depth: settings.summaryDepth, apiKey: apiKey)
-        return ProcessingResult(transcript: cleaned, summary: summary)
-    }
-
-    public func generateTitle(transcript: Transcript, apiKey: String) async -> String {
-        let messages = [
-            ChatMessage(
-                role: "user",
-                content: """
-                Reply with only a title of 4-6 words for this conversation. \
-                Use plain words, no punctuation, no quotes.
-
-                Transcript:
-                \(transcript.textForSummarization.prefix(400))
-                """
-            )
-        ]
-
-        do {
-            let data = try await chatCompletion(
-                messages: messages,
-                apiKey: apiKey,
-                responseFormat: nil,
-                maxCompletionTokens: 40
-            )
-            guard let text = try ChatCompletionTextExtractor.extractText(from: data) else {
-                return "recording"
-            }
-            return sanitizeTitle(text)
-        } catch {
-            return "recording"
-        }
-    }
-
-    private func sanitizeTitle(_ raw: String) -> String {
-        let stripped = raw
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "\"", with: "")
-            .replacingOccurrences(of: "'", with: "")
-            .replacingOccurrences(of: ".", with: "")
-            .replacingOccurrences(of: ",", with: "")
-            .replacingOccurrences(of: ":", with: "")
-        let firstLine = stripped.components(separatedBy: "\n").first ?? stripped
-        let words = firstLine.split(separator: " ").prefix(6).joined(separator: " ")
-        return words.isEmpty ? "recording" : words
-    }
-
-    private func transcribe(capture: AudioCaptureResult, apiKey: String) async throws -> Transcript {
         var segments: [TranscriptSegment] = []
 
         for file in capture.files {
@@ -141,6 +69,11 @@ public final class GroqProcessingProvider: ProcessingProvider, @unchecked Sendab
             }
         }
 
+        guard !segments.isEmpty else {
+            throw ProcessingProviderError.apiError(
+                "No speech was detected in the recording. Check the captured audio and try again."
+            )
+        }
         return Transcript(segments: segments)
     }
 
@@ -175,74 +108,6 @@ public final class GroqProcessingProvider: ProcessingProvider, @unchecked Sendab
         }
     }
 
-    private func summarize(transcript: Transcript, depth: SummaryDepth, apiKey: String) async throws -> MeetingSummary {
-        let messages = [
-            ChatMessage(
-                role: "user",
-                content: """
-                Create a \(depth.rawValue) meeting summary from this transcript.
-                Write each keyPoint as a concise insight in your own words; do not copy transcript sentences verbatim.
-
-                Transcript:
-                \(transcript.textForSummarization)
-                """
-            )
-        ]
-        let responseFormat = ChatResponseFormat(
-            type: "json_schema",
-            jsonSchema: ChatJSONSchema(
-                name: "meeting_summary",
-                strict: true,
-                schema: SummarySchema.object
-            )
-        )
-        let data = try await chatCompletion(
-            messages: messages,
-            apiKey: apiKey,
-            responseFormat: responseFormat,
-            maxCompletionTokens: 2_048
-        )
-
-        guard let text = try ChatCompletionTextExtractor.extractText(from: data) else {
-            throw ProcessingProviderError.apiError("Groq summary response did not contain output text.")
-        }
-        guard let jsonData = text.data(using: .utf8) else {
-            throw ProcessingProviderError.invalidResponse
-        }
-
-        do {
-            return try JSONDecoder().decode(MeetingSummary.self, from: jsonData)
-        } catch {
-            throw ProcessingProviderError.apiError(
-                "Groq summary response was not valid meeting-summary JSON: \(error.localizedDescription)"
-            )
-        }
-    }
-
-    private func chatCompletion(
-        messages: [ChatMessage],
-        apiKey: String,
-        responseFormat: ChatResponseFormat?,
-        maxCompletionTokens: Int
-    ) async throws -> Data {
-        var request = URLRequest(url: URL(string: "\(Self.baseURL)/chat/completions")!)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(
-            ChatCompletionRequest(
-                model: summaryModel,
-                messages: messages,
-                responseFormat: responseFormat,
-                maxCompletionTokens: maxCompletionTokens
-            )
-        )
-
-        let (data, response) = try await session.data(for: request)
-        try validate(response: response, data: data)
-        return data
-    }
-
     private func validate(response: URLResponse, data: Data) throws {
         guard let httpResponse = response as? HTTPURLResponse else {
             throw ProcessingProviderError.invalidResponse
@@ -266,10 +131,6 @@ public final class GroqProcessingProvider: ProcessingProvider, @unchecked Sendab
         default:
             return .apiError(parsed?.message ?? rawFallback)
         }
-    }
-
-    static func decodeChatCompletionText(from data: Data) throws -> String? {
-        try ChatCompletionTextExtractor.extractText(from: data)
     }
 
     static func decodeTranscriptionSegments(
@@ -362,97 +223,4 @@ private struct TranscriptionSegmentResponse: Decodable {
     let start: TimeInterval
     let end: TimeInterval
     let text: String
-}
-
-private struct ChatMessage: Codable {
-    let role: String
-    let content: String
-}
-
-private struct ChatCompletionRequest: Encodable {
-    let model: String
-    let messages: [ChatMessage]
-    let responseFormat: ChatResponseFormat?
-    let maxCompletionTokens: Int
-
-    enum CodingKeys: String, CodingKey {
-        case model
-        case messages
-        case responseFormat = "response_format"
-        case maxCompletionTokens = "max_completion_tokens"
-    }
-}
-
-private struct ChatResponseFormat: Encodable {
-    let type: String
-    let jsonSchema: ChatJSONSchema
-
-    enum CodingKeys: String, CodingKey {
-        case type
-        case jsonSchema = "json_schema"
-    }
-}
-
-private struct ChatJSONSchema: Encodable {
-    let name: String
-    let strict: Bool
-    let schema: SummarySchema
-}
-
-private struct SummarySchema: Encodable {
-    let type: String
-    let additionalProperties: Bool
-    let required: [String]
-    let properties: [String: SummarySchemaProperty]
-
-    static let object = SummarySchema(
-        type: "object",
-        additionalProperties: false,
-        required: ["title", "keyPoints", "decisions", "actionItems", "followUps"],
-        properties: [
-            "title": .string,
-            "keyPoints": .stringArray,
-            "decisions": .stringArray,
-            "actionItems": .stringArray,
-            "followUps": .stringArray
-        ]
-    )
-}
-
-private enum SummarySchemaProperty: Encodable {
-    case string
-    case stringArray
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        switch self {
-        case .string:
-            try container.encode("string", forKey: .type)
-        case .stringArray:
-            try container.encode("array", forKey: .type)
-            try container.encode(StringItemSchema(type: "string"), forKey: .items)
-        }
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case type
-        case items
-    }
-}
-
-private struct StringItemSchema: Encodable {
-    let type: String
-}
-
-private struct ChatCompletionTextExtractor {
-    static func extractText(from data: Data) throws -> String? {
-        let object = try JSONSerialization.jsonObject(with: data)
-        guard let dictionary = object as? [String: Any],
-              let choices = dictionary["choices"] as? [[String: Any]],
-              let message = choices.first?["message"] as? [String: Any],
-              let content = message["content"] as? String else {
-            return nil
-        }
-        return content.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
 }

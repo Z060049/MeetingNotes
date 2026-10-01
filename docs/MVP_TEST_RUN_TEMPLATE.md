@@ -15,10 +15,9 @@ Copy this template for each validation pass. Use `docs/MVP_VALIDATION_CHECKLIST.
 - Audio output route:
 - Headphones/speakers/Bluetooth:
 - Output folder:
-- Processing mode: Local/Groq API
-- Local models downloaded, if selected:
-- Groq API key stored in Keychain, if selected: Yes/No
-- Groq models observed/configured:
+- Transcription provider: Groq API
+- Groq API key stored in Keychain: Yes/No
+- Groq transcription model observed/configured:
 
 ## Permission Status
 
@@ -28,7 +27,7 @@ Copy this template for each validation pass. Use `docs/MVP_VALIDATION_CHECKLIST.
 - Keychain prompt shown: Yes/No
 - Notes:
 
-## Summary
+## Run Summary
 
 - Overall result: Pass/Fail/Partial
 - Highest severity issue:
@@ -131,7 +130,8 @@ Copy this template for each validation pass. Use `docs/MVP_VALIDATION_CHECKLIST.
 
 - Result:
 - Markdown path:
-- No fake decisions/action items: Yes/No
+- Exactly one raw transcript file: Yes/No
+- Summary sections absent: Yes/No
 - Diagnostics copied: Yes/No
 - Notes:
 

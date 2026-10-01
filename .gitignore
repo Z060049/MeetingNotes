@@ -9,3 +9,10 @@ DerivedData/
 .netrc
 .env
 /gitignore/
+
+# Recorded meeting audio — never commit recordings.
+# Failed/preserved recordings are written to "<date>_unprocessed/" folders.
+*_unprocessed/
+Recording Recovery/
+*.wav
+*.m4a

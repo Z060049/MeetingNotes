@@ -22,10 +22,6 @@ public final class MeetingNotesController: ObservableObject {
     @Published public private(set) var permissionSnapshot: PermissionSnapshot
     public let didResumeAfterScreenCaptureRelaunch: Bool
 
-    /// Manages on-device Whisper and LLM models. Observe this in Settings for
-    /// download state and actions.
-    @Published public private(set) var localModelManager: LocalModelManager
-
     public let silenceDetected = PassthroughSubject<Void, Never>()
     public let processingFailed = PassthroughSubject<ProcessingFailure, Never>()
     public let onboardingRequested = PassthroughSubject<Void, Never>()
@@ -70,13 +66,7 @@ public final class MeetingNotesController: ObservableObject {
             )
         )
         self.settings = loadedSettings
-        let manager = LocalModelManager()
-        self.localModelManager = manager
-        self.processingProvider = processingProvider ?? Self.makeProvider(
-            for: loadedSettings,
-            localModelManager: manager,
-            credentialStore: credentialStore
-        )
+        self.processingProvider = processingProvider ?? Self.makeProvider(credentialStore: credentialStore)
         audioCaptureService.onRouteTransition = { [weak self] status in
             Task { @MainActor in
                 self?.handleRouteTransition(status)
@@ -86,7 +76,6 @@ public final class MeetingNotesController: ObservableObject {
             self.addDiagnostic("Controller initialized. Output folder: \(self.settings.outputDirectory.path)")
             self.reportRecoverableRecordings()
         }
-        manager.checkDownloadStatus(whisperModel: loadedSettings.whisperModel, mlxModelID: loadedSettings.localLLMModel)
     }
 
     public var isSetupComplete: Bool {
@@ -94,21 +83,15 @@ public final class MeetingNotesController: ObservableObject {
         // microphone-only when it is unavailable, so it must not block setup.
         settings.hasAcceptedConsentChecklist
             && settings.hasCompletedOnboarding
-            && settings.hasSelectedProcessingMode
             && permissionSnapshot.microphone.isAuthorized
             && isProcessingSetupReady
     }
 
     public var isProcessingSetupReady: Bool {
-        switch settings.processingMode {
-        case .api:
-            guard let key = EnvironmentConfiguration.groqAPIKey(credentialStore: credentialStore) else {
-                return false
-            }
-            return !key.isEmpty
-        case .local:
-            return localModelManager.isReadyToProcess(settings: settings)
+        guard let key = EnvironmentConfiguration.groqAPIKey(credentialStore: credentialStore) else {
+            return false
         }
+        return !key.isEmpty
     }
 
     public var hasGroqAPIKey: Bool {
@@ -139,38 +122,17 @@ public final class MeetingNotesController: ObservableObject {
 
     // MARK: - Provider factory
 
-    private static func makeProvider(
-        for settings: AppSettings,
-        localModelManager: LocalModelManager,
-        credentialStore: APICredentialStoring
-    ) -> ProcessingProvider {
-        switch settings.processingMode {
-        case .api:
-            return GroqProcessingProvider {
-                EnvironmentConfiguration.groqAPIKey(credentialStore: credentialStore)
-            }
-        case .local:
-            return LocalProcessingProvider(
-                transcriptionService: localModelManager.transcriptionService,
-                summarizationService: localModelManager.summarizationService
-            )
+    private static func makeProvider(credentialStore: APICredentialStoring) -> ProcessingProvider {
+        GroqProcessingProvider {
+            EnvironmentConfiguration.groqAPIKey(credentialStore: credentialStore)
         }
     }
 
     // MARK: - Settings
 
     @MainActor public func updateSettings(_ settings: AppSettings) {
-        let previousMode = self.settings.processingMode
         self.settings = settings
         settingsStore.save(settings)
-        if settings.processingMode != previousMode {
-            processingProvider = Self.makeProvider(
-                for: settings,
-                localModelManager: localModelManager,
-                credentialStore: credentialStore
-            )
-            addDiagnostic("Processing provider switched to \(settings.processingMode.rawValue) mode.")
-        }
         addDiagnostic("Settings saved. Timeout: \(Int(settings.inactivityTimeoutSeconds))s, output: \(settings.outputDirectory.path)")
     }
 
@@ -179,14 +141,6 @@ public final class MeetingNotesController: ObservableObject {
         updated.hasAcceptedConsentChecklist = true
         updateSettings(updated)
         addDiagnostic("Consent checklist accepted.")
-    }
-
-    @MainActor public func selectProcessingMode(_ mode: ProcessingMode) {
-        var updated = settings
-        updated.processingMode = mode
-        updated.hasSelectedProcessingMode = true
-        updated.hasCompletedOnboarding = false
-        updateSettings(updated)
     }
 
     @MainActor public func saveGroqAPIKey(_ apiKey: String) throws {
@@ -239,7 +193,6 @@ public final class MeetingNotesController: ObservableObject {
     @MainActor public func completeOnboarding() {
         refreshPermissionStatus()
         guard settings.hasAcceptedConsentChecklist,
-              settings.hasSelectedProcessingMode,
               permissionSnapshot.microphone.isAuthorized,
               isProcessingSetupReady else {
             addDiagnostic("Onboarding completion blocked because setup is incomplete.", level: .warning)
@@ -270,9 +223,7 @@ public final class MeetingNotesController: ObservableObject {
         refreshPermissionStatus()
         guard isSetupComplete else {
             if !isProcessingSetupReady {
-                lastError = settings.processingMode == .api
-                    ? "Add your Groq API key before recording."
-                    : "Download the required local models before recording."
+                lastError = "Add your Groq API key before recording."
             } else {
                 lastError = "Finish setup and grant Microphone access before starting."
             }
@@ -284,15 +235,19 @@ public final class MeetingNotesController: ObservableObject {
         let sessionID = UUID()
         let session = RecordingSession(
             id: sessionID,
-            processingMode: settings.processingMode,
+            processingMode: .api,
             outputDirectory: settings.outputDirectory,
             temporaryDirectory: FileManager.default.meetingNotesRecordingWorkspace(for: sessionID)
         )
 
         latestOutputURL = nil
+        latestRawTranscriptURL = nil
         addDiagnostic("Recording session \(Self.shortSessionID(session.id)) started.")
         addDiagnostic("Recording output folder: \(settings.outputDirectory.path)")
-        addDiagnostic("Recording mode: \(settings.processingMode.rawValue), silence prompt after: \(Int(settings.inactivityTimeoutSeconds))s")
+        let silencePromptDescription = settings.shouldPromptAfterSilence
+            ? "after \(Int(settings.inactivityTimeoutSeconds))s"
+            : "disabled"
+        addDiagnostic("Transcription provider: Groq API, silence prompt: \(silencePromptDescription)")
         addDiagnostic("Audio capture startup in progress.")
         isStartingRecording = true
         lastError = nil
@@ -362,140 +317,26 @@ public final class MeetingNotesController: ObservableObject {
 
     @MainActor private func process(_ capture: AudioCaptureResult) async {
         setState(.processing(capture.session))
-        addDiagnostic("Processing session \(Self.shortSessionID(capture.session.id)).")
-        addDiagnostic("Processing started with \(capture.files.count) audio file(s).")
-        addDiagnostic("Processing mode: \(settings.processingMode.rawValue).")
+        addDiagnostic("Transcribing session \(Self.shortSessionID(capture.session.id)).")
+        addDiagnostic("Transcription started with \(capture.files.count) audio file(s).")
         logTranscriptionDecisions(for: capture.files)
 
-        // Capture values needed inside the Sendable closure.
-        let outputDirectory = settings.outputDirectory
-        let currentSettings = settings
-        let session = capture.session
-
-        // shortTitle is set while the unmodified transcript is persisted and read
-        // after process() returns.
-        // We use an actor-isolated box so the closure can write it safely.
-        let titleBox = TitleBox()
-        // Tracks whether transcription actually produced a transcript. If it did
-        // not (e.g. the transcription request failed), we must preserve the audio
-        // instead of writing an empty note and deleting the recording.
-        let transcriptProduced = FlagBox()
-
-        let onTranscriptReady: @Sendable (Transcript) async -> Void = { [weak self] transcript in
-            guard let self else { return }
-            await transcriptProduced.set()
-
-            // 1. Generate a short title (~4–6 words, 40 token cap).
-            let shortTitle: String
-            switch currentSettings.processingMode {
-            case .local:
-                shortTitle = await self.localModelManager.summarizationService.generateTitle(
-                    transcript: transcript,
-                    mlxModelID: currentSettings.localLLMModel
-                )
-            case .api:
-                if let apiKey = EnvironmentConfiguration.groqAPIKey(credentialStore: self.credentialStore),
-                   !apiKey.isEmpty {
-                    let provider = GroqProcessingProvider { apiKey }
-                    shortTitle = await provider.generateTitle(transcript: transcript, apiKey: apiKey)
-                } else {
-                    shortTitle = "recording"
-                }
-            }
-
-            await titleBox.set(shortTitle)
-
-            // 2. Write the pre-deduplication transcript immediately as a true raw
-            // fallback. The final summary document receives the cleaned transcript.
-            do {
-                let rawURL = try self.markdownExporter.exportRawTranscription(
-                    transcript: transcript,
-                    shortTitle: shortTitle,
-                    session: session,
-                    to: outputDirectory
-                )
-                await MainActor.run { [weak self] in
-                    self?.latestRawTranscriptURL = rawURL
-                    self?.addDiagnostic("Unmodified raw transcript saved to \(rawURL.path)")
-                }
-            } catch {
-                await MainActor.run { [weak self] in
-                    self?.addDiagnostic(
-                        "Could not write raw transcript: \(error.localizedDescription)",
-                        level: .warning
-                    )
-                }
-            }
-        }
-
         do {
-            // Run transcription (and the onTranscriptReady callback which writes
-            // the raw transcript file). Summarization errors are caught separately
-            // below so the summary file is always written.
-            let result: ProcessingResult
-            do {
-                result = try await processingProvider.process(
-                    capture: capture,
-                    settings: settings,
-                    onTranscriptReady: onTranscriptReady
-                )
-                addDiagnostic("Processing complete. Exporting summary Markdown.")
-            } catch {
-                // If transcription never produced a transcript, this is a
-                // transcription failure (e.g. the request timed out or the audio
-                // was rejected). Re-throw so the outer handler preserves the audio
-                // instead of writing an empty note and deleting the recording.
-                guard await transcriptProduced.value else {
-                    throw error
-                }
-
-                // Summarization or model-load failed, but the raw transcript is
-                // already on disk (written by onTranscriptReady). Produce a minimal
-                // summary file so the user always gets both files.
-                let shortTitle = await titleBox.value ?? "recording"
-                let base = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-                addDiagnostic("Summarization failed (\(base)). Writing minimal summary file.", level: .warning)
-
-                // Build a fallback ProcessingResult using an empty transcript if
-                // we never got one (e.g. Whisper itself failed — very rare).
-                let emptyTranscript = Transcript(segments: [])
-                let fallbackSummary = MeetingSummary(
-                    title: shortTitle,
-                    keyPoints: [],
-                    decisions: [],
-                    actionItems: [],
-                    followUps: []
-                )
-                result = ProcessingResult(transcript: emptyTranscript, summary: fallbackSummary)
-            }
-
-            // Use the same shortTitle generated during onTranscriptReady so both
-            // files share the same filename prefix.
-            let shortTitle = await titleBox.value
-            let outputURL: URL
-            if let shortTitle {
-                outputURL = try markdownExporter.exportSummary(
-                    result: result,
-                    shortTitle: shortTitle,
-                    session: capture.session,
-                    to: settings.outputDirectory
-                )
-            } else {
-                outputURL = try markdownExporter.export(
-                    result: result,
-                    session: capture.session,
-                    to: settings.outputDirectory
-                )
-            }
+            let transcript = try await processingProvider.transcribe(capture: capture)
+            let outputURL = try markdownExporter.exportRawTranscription(
+                transcript: transcript,
+                shortTitle: "recording",
+                session: capture.session,
+                to: settings.outputDirectory
+            )
 
             cleanupTemporaryFiles(for: capture.session)
+            latestRawTranscriptURL = outputURL
             latestOutputURL = outputURL
             setState(.complete(outputURL))
-            addDiagnostic("Summary saved to \(outputURL.path)")
+            addDiagnostic("Raw transcript saved to \(outputURL.path)")
             addDiagnostic("Validation output: duration \(Self.durationDescription(capture.session.duration)), path \(outputURL.path)")
         } catch {
-            // Only reaches here if transcription itself failed (Whisper error,
-            // no speech detected, etc.) — summarization errors are handled above.
             let savedURL = preserveUnprocessedAudio(capture)
             cleanupTemporaryFiles(for: capture.session)
             inactivityMonitor?.stop()
@@ -511,19 +352,6 @@ public final class MeetingNotesController: ObservableObject {
             addDiagnostic(message, level: .error)
             processingFailed.send(ProcessingFailure(message: message, savedAudioURL: savedURL))
         }
-    }
-
-    /// A simple actor-isolated box for passing the generated title out of
-    /// the `onTranscriptReady` closure back into the enclosing `process()` scope.
-    private actor TitleBox {
-        private(set) var value: String?
-        func set(_ v: String) { value = v }
-    }
-
-    /// A simple actor-isolated boolean flag settable from a `Sendable` closure.
-    private actor FlagBox {
-        private(set) var value = false
-        func set() { value = true }
     }
 
     private func preserveUnprocessedAudio(_ capture: AudioCaptureResult) -> URL? {
@@ -551,6 +379,15 @@ public final class MeetingNotesController: ObservableObject {
     }
 
     @MainActor private func configureInactivityMonitor() async {
+        inactivityMonitor?.stop()
+        inactivityMonitor = nil
+        audioCaptureService.setOnAudioLevel(nil)
+
+        guard settings.shouldPromptAfterSilence else {
+            addDiagnostic("Silence prompt disabled.")
+            return
+        }
+
         let cutoff = settings.inactivityTimeoutSeconds
         let monitor = InactivityMonitor(timeout: cutoff) { [weak self] in
             Task { @MainActor in
@@ -613,6 +450,9 @@ public final class MeetingNotesController: ObservableObject {
         let outputPath = latestOutputURL?.path ?? "None"
         let error = lastError ?? "None"
         let diagnosticsText = diagnostics.map(\.formatted).joined(separator: "\n")
+        let silencePrompt = settings.shouldPromptAfterSilence
+            ? "after \(Int(settings.inactivityTimeoutSeconds))s"
+            : "disabled"
 
         return """
         MeetingNotes Validation Report
@@ -620,9 +460,8 @@ public final class MeetingNotesController: ObservableObject {
         State: \(state.title)
         Output folder: \(settings.outputDirectory.path)
         Latest output: \(outputPath)
-        Processing mode: \(settings.processingMode.rawValue)
-        Summary depth: \(settings.summaryDepth.rawValue)
-        Silence prompt after: \(Int(settings.inactivityTimeoutSeconds))s
+        Transcription provider: Groq API
+        Silence prompt: \(silencePrompt)
         Onboarding complete: \(settings.hasCompletedOnboarding)
         Microphone permission: \(permissionSnapshot.microphone.rawValue)
         Screen & system audio permission: \(permissionSnapshot.screenCapture.rawValue)

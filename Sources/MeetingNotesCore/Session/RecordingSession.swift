@@ -7,7 +7,6 @@ public enum AudioSource: String, Codable, CaseIterable, Sendable {
 
 public enum ProcessingMode: String, Codable, CaseIterable, Sendable {
     case api = "API"
-    case local = "Local"
 }
 
 public struct RecordingSession: Codable, Equatable, Identifiable, Sendable {
